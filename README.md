@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/banner.svg" alt="RHEL Image Builder — build once, ship to Quay, OpenShift Virtualization, and Proxmox, governed by Red Hat Satellite" width="100%">
+</p>
+
 # RHEL qcow2 Image Builder
 
 Ansible automation for building customized **Red Hat Enterprise Linux** qcow2
