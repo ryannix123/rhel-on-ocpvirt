@@ -86,6 +86,59 @@ Before pushing anything to a public repo:
 
 ---
 
+## Where do I run what?
+
+**The image build must run on a RHEL 9/10 host.** `image-builder` depends on
+osbuild and entitled subscription content, which exist only on a registered
+RHEL machine — it cannot run on macOS or on an unsubscribed Linux box. The
+easiest builder is a small RHEL VM on **Proxmox** or **OpenShift
+Virtualization**, registered with `subscription-manager`. You drive everything
+else from your workstation over SSH.
+
+| Command / step | Run it on | Why |
+|---|---|---|
+| `git`, editing files | **Your workstation** (Mac/Linux) | Normal dev loop. |
+| `openssl passwd -6` (generate admin hash) | **Your workstation** | macOS/Linux both have `openssl`. Pipe to `pbcopy` on Mac. |
+| `ssh` into the builder | **Your workstation → builder** | You operate the builder remotely. |
+| `ansible-playbook ... build-images.yml` | **RHEL 9/10 builder** | This invokes `image-builder` — RHEL-only. |
+| `oc` / `tkn` / `virtctl` (cluster, pipeline, VMs) | **Your workstation** | Talk to OpenShift remotely. |
+| `oras pull` (fetch qcow2 for Proxmox) | **Your workstation** or Proxmox host | Just downloads the artifact. |
+| `qm importdisk` (Proxmox import) | **Proxmox host** | Proxmox CLI lives there. |
+
+> **About `pbcopy`:** it's a macOS-only convenience for copying command output
+> to your clipboard. **None of this repo's commands require it** — they write
+> files and push images, not clipboard text. The only place it appears is the
+> optional password-hash step, which you run on your Mac anyway. On a Linux
+> builder the equivalent would be `xclip -selection clipboard` or `wl-copy`,
+> but you rarely need it here since you're working over SSH with file output.
+
+### Typical flow across machines
+
+```text
+┌─ Your Mac ───────────────────────────────────────────────┐
+│  git clone / edit                                         │
+│  openssl passwd -6 | pbcopy   → paste into build-images.yml│
+│  ssh admin@rhel-builder ──────────────────────────────────┼──┐
+└───────────────────────────────────────────────────────────┘  │
+                                                                ▼
+┌─ RHEL 9/10 builder (Proxmox or OpenShift Virt VM) ────────────┐
+│  ansible-playbook -i inventory.ini build-images.yml ...        │
+│  → produces output/rhel-<ver>-x86_64.qcow2                     │
+└────────────────────────────────────────────────────────────────┘
+                                                                ▲
+┌─ Your Mac ──────────────────────────────────────────────────┐ │
+│  oc apply -f manifests/vm-from-containerdisk.yaml  (OpenShift)│ │
+│  oras pull ... ; scp to Proxmox ; qm importdisk    (Proxmox) ─┼─┘
+└──────────────────────────────────────────────────────────────┘
+```
+
+> Running the Tekton pipeline instead? Then the build happens **inside the
+> cluster** on an entitled RHEL builder node, and you only need `oc`/`tkn` from
+> your workstation — no manual SSH. See
+> [Pipeline: build once, store in Quay](#pipeline-build-once-store-in-quay-boot-anywhere).
+
+---
+
 ## Quick start
 
 ### 1. Clone the repo
@@ -97,7 +150,9 @@ cd rhel-image-builder
 
 ### 2. Generate an admin password hash
 
-The default hash in the playbook is literally `changeme`. Replace it.
+The default hash in the playbook is literally `changeme`. Replace it. Run this
+**on your workstation** (the `pbcopy` pipe is macOS; on Linux drop it or use
+`xclip`):
 
 ```bash
 openssl passwd -6 | pbcopy
