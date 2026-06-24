@@ -16,10 +16,10 @@ Based on the Red Hat Developer article:
 
 Before pushing anything to a public repo:
 
-- **Never commit a real password hash.** The `admin_password_hash` in
-  `build-images.yml` ships as a placeholder for `changeme`. Replace it for your
-  builds, but do not commit your real hash — keep it in a vault file or pass it
-  at runtime.
+- **No password is baked into the image.** The `admin` user is SSH-key-only,
+  so there's no credential to leak in the first place. The playbook reads your
+  public key at runtime — never commit private keys, and the matching private
+  key never enters this repo.
 - **Never commit `org_id` or `activation_key`.** These are credentials. Pass
   them with `-e` at runtime or store them in an Ansible Vault file that is
   **git-ignored**.
@@ -45,7 +45,7 @@ Before pushing anything to a public repo:
 ## What you get
 
 - One qcow2 per RHEL version you target, with `qemu-guest-agent` baked in.
-- An `admin` user in the `wheel` group.
+- An `admin` user with **SSH key auth (no password)** and passwordless sudo.
 - An optional firstboot systemd service that registers the system with
   subscription-manager and pins it to the matching **EUS** release and repos.
 - All build inputs (repo definitions, blueprints) generated from templates, so
@@ -98,7 +98,7 @@ else from your workstation over SSH.
 | Command / step | Run it on | Why |
 |---|---|---|
 | `git`, editing files | **Your workstation** (Mac/Linux) | Normal dev loop. |
-| `openssl passwd -6` (generate admin hash) | **Your workstation** | macOS/Linux both have `openssl`. Pipe to `pbcopy` on Mac. |
+| `ssh-keygen -t ed25519` (if you lack a key) | **Your workstation** | The playbook injects your *public* key into the image. |
 | `ssh` into the builder | **Your workstation → builder** | You operate the builder remotely. |
 | `ansible-playbook ... build-images.yml` | **RHEL 9/10 builder** | This invokes `image-builder` — RHEL-only. |
 | `oc` / `tkn` / `virtctl` (cluster, pipeline, VMs) | **Your workstation** | Talk to OpenShift remotely. |
@@ -107,22 +107,23 @@ else from your workstation over SSH.
 
 > **About `pbcopy`:** it's a macOS-only convenience for copying command output
 > to your clipboard. **None of this repo's commands require it** — they write
-> files and push images, not clipboard text. The only place it appears is the
-> optional password-hash step, which you run on your Mac anyway. On a Linux
-> builder the equivalent would be `xclip -selection clipboard` or `wl-copy`,
-> but you rarely need it here since you're working over SSH with file output.
+> files and push images, not clipboard text. (Earlier versions used it for a
+> password-hash step; that's gone now that login is SSH-key-only.) On a Linux
+> builder the clipboard equivalents are `xclip -selection clipboard` or
+> `wl-copy`, but you rarely need them since you work over SSH with file output.
 
 ### Typical flow across machines
 
 ```text
 ┌─ Your Mac ───────────────────────────────────────────────┐
 │  git clone / edit                                         │
-│  openssl passwd -6 | pbcopy   → paste into build-images.yml│
+│  ssh-keygen -t ed25519   (only if you don't have a key)   │
 │  ssh admin@rhel-builder ──────────────────────────────────┼──┐
 └───────────────────────────────────────────────────────────┘  │
                                                                 ▼
 ┌─ RHEL 9/10 builder (Proxmox or OpenShift Virt VM) ────────────┐
 │  ansible-playbook -i inventory.ini build-images.yml ...        │
+│  (reads your ~/.ssh/id_ed25519.pub, bakes it into the image)   │
 │  → produces output/rhel-<ver>-x86_64.qcow2                     │
 └────────────────────────────────────────────────────────────────┘
                                                                 ▲
@@ -148,18 +149,29 @@ git clone https://github.com/<your-org>/rhel-image-builder.git
 cd rhel-image-builder
 ```
 
-### 2. Generate an admin password hash
+### 2. Make sure you have an SSH key
 
-The default hash in the playbook is literally `changeme`. Replace it. Run this
-**on your workstation** (the `pbcopy` pipe is macOS; on Linux drop it or use
-`xclip`):
+The image is **key-auth only** — no password. The playbook injects your public
+key into the `admin` user automatically. If you don't already have a key, make
+one **on your workstation**:
 
 ```bash
-openssl passwd -6 | pbcopy
+ssh-keygen -t ed25519
 ```
 
-Paste the result into `build-images.yml` (`admin_password_hash:`), or better,
-keep it in a vault file and pass it at runtime.
+By default the playbook reads `~/.ssh/id_ed25519.pub`. To use a different key,
+point it at one (or pass the key inline):
+
+```bash
+# use a specific key file
+ansible-playbook ... -e admin_ssh_key_file=~/.ssh/id_rsa.pub
+
+# or pass the key string directly
+ansible-playbook ... -e admin_ssh_key="ssh-ed25519 AAAA... you@host"
+```
+
+No password to generate, paste, or commit — the matching private key never
+enters this repo.
 
 ### 3. Point the inventory at your build host
 
@@ -477,7 +489,8 @@ All variables live at the top of `build-images.yml`:
 | `arch` | `x86_64` | Target architecture. |
 | `org_id` | `""` | Subscription org ID for firstboot registration. |
 | `activation_key` | `""` | Activation key for firstboot registration. |
-| `admin_password_hash` | `changeme` hash | SHA-512 hash from `openssl passwd -6`. |
+| `admin_ssh_key` | `""` | SSH public key string. If empty, read from `admin_ssh_key_file`. |
+| `admin_ssh_key_file` | `~/.ssh/id_ed25519.pub` | Public key file read at runtime when `admin_ssh_key` is unset. |
 | `work_dir` | `/var/lib/image-builder-workspace` | Build scratch space. |
 | `output_dir` | `<work_dir>/output` | Where finished qcow2 files are copied. |
 

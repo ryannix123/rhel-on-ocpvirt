@@ -35,9 +35,13 @@
     org_id: ""
     activation_key: ""
 
-    # Hashed password for the 'admin' user. Default below is literally
-    # 'changeme' — regenerate with:  openssl passwd -6
-    admin_password_hash: "$6$rounds=656000$abcd1234abcd1234$0K0z3qg0Jp0qK7m1yqxq2qHnQp9w8R7e6t5y4u3i2o1p0a9s8d7f6g5h4j3k2l1zXcVbNmQwErTyUiOpA"
+    # SSH public key injected into the 'admin' user. No password is set —
+    # the image is key-auth only. Resolution order:
+    #   1. admin_ssh_key passed on the CLI (-e admin_ssh_key="ssh-ed25519 ...")
+    #   2. the file at admin_ssh_key_file (defaults to your ed25519 pubkey)
+    # The playbook reads the file at runtime so you don't paste keys around.
+    admin_ssh_key: ""
+    admin_ssh_key_file: "{{ lookup('env', 'HOME') }}/.ssh/id_ed25519.pub"
 
     work_dir: "/var/lib/image-builder-workspace"
     # Where finished images get copied. Mount/scp this to Proxmox after.
@@ -52,6 +56,36 @@
         fail_msg: >-
           image-builder CLI requires a RHEL 9.x or 10.x build host.
           This host is {{ ansible_distribution }} {{ ansible_distribution_version }}.
+
+    - name: Resolve admin SSH public key
+      when: admin_ssh_key | length == 0
+      block:
+        - name: Read SSH public key from file
+          ansible.builtin.slurp:
+            src: "{{ admin_ssh_key_file }}"
+          register: _ssh_key_raw
+          delegate_to: localhost
+          become: false
+
+        - name: Set admin_ssh_key fact from file
+          ansible.builtin.set_fact:
+            admin_ssh_key: "{{ (_ssh_key_raw.content | b64decode).strip() }}"
+      rescue:
+        - name: Fail with a clear message when no key is available
+          ansible.builtin.fail:
+            msg: >-
+              No SSH public key found. Either pass one directly with
+              -e admin_ssh_key="ssh-ed25519 AAAA..." or point admin_ssh_key_file
+              at an existing public key (looked for {{ admin_ssh_key_file }}).
+              Generate one with: ssh-keygen -t ed25519
+
+    - name: Validate the resolved key looks like an SSH public key
+      ansible.builtin.assert:
+        that:
+          - admin_ssh_key is match('^(ssh-(ed25519|rsa)|ecdsa-)')
+        fail_msg: >-
+          admin_ssh_key does not look like a valid SSH public key:
+          '{{ admin_ssh_key | truncate(40) }}'
 
     - name: Install image-builder and qemu tooling
       ansible.builtin.dnf:
@@ -112,11 +146,14 @@
         owner: "{{ ansible_env.SUDO_USER | default('root') }}"
       loop: "{{ target_versions }}"
 
-    - name: Report built images
+    - name: Summary
       ansible.builtin.debug:
         msg: >-
-          Built: {{ output_dir }}/rhel-{{ item }}-{{ arch }}.qcow2
-      loop: "{{ target_versions }}"
+          Build complete. Images in {{ output_dir }}:
+          {{ target_versions | map('regex_replace', '^(.*)$', 'rhel-\1-' + arch + '.qcow2') | list }}.
+          Login: user 'admin' via SSH key auth (no password). Connect with the
+          private key matching the injected public key, e.g.
+          'ssh admin@<vm-ip>'. The 'admin' user has passwordless sudo via wheel.
 
 # ---------------------------------------------------------------------------
 # RHEL 7 IMAGES
