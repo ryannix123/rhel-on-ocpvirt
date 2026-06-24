@@ -59,9 +59,15 @@ Before pushing anything to a public repo:
 .
 ├── build-images.yml              # main playbook
 ├── inventory.ini                 # build host inventory
-└── templates/
-    ├── rhel-repos.json.j2         # per-version CDN repo definition
-    └── blueprint.toml.j2          # per-version image blueprint
+├── Containerfile.containerdisk   # wraps a qcow2 into a KubeVirt containerDisk
+├── templates/
+│   ├── rhel-repos.json.j2         # per-version CDN repo definition
+│   └── blueprint.toml.j2          # per-version image blueprint
+├── tekton/
+│   ├── pipeline.yaml              # build → wrap → push-to-Quay pipeline
+│   └── pipelinerun-example.yaml   # trigger a build for one version
+└── manifests/
+    └── vm-from-containerdisk.yaml # boot a VM from the Quay artifact
 ```
 
 ---
@@ -308,7 +314,105 @@ virtctl ssh admin@rhel-96-vm -n vms
 
 ---
 
-## Configuration reference
+## Pipeline: build once, store in Quay, boot anywhere
+
+You can offload the whole build to **OpenShift Pipelines (Tekton)** and store
+the result in **Quay**, so VMs are sourced from a versioned, centrally-managed
+artifact instead of a qcow2 someone built on a laptop. That registry-as-source-
+of-truth model *is* the supply-chain improvement story — the same posture
+Satellite enforces for running hosts, applied to your golden images.
+
+### How a qcow2 lives in Quay
+
+A qcow2 is a VM disk, not a container image — so it can't go into Quay as-is.
+The pipeline produces **two** artifacts from one build, and you choose how to
+consume them:
+
+| Artifact | What it is | Who consumes it |
+|---|---|---|
+| **containerDisk** (`...:9.6`) | qcow2 baked into a `FROM scratch` OCI image at `/disk/` | OpenShift Virt — boots directly, no download step |
+| **raw qcow2** (`...-raw:9.6`) | the qcow2 pushed as a generic OCI artifact via `oras` | Proxmox — `oras pull`, then `qm importdisk` |
+
+The containerDisk is the native path for OpenShift Virtualization. The raw
+artifact exists so Proxmox (which can't boot from a registry) can still pull a
+governed, versioned image instead of a loose file.
+
+### ⚠️ Runner reality — read this first
+
+`image-builder` needs **root, osbuild, and entitled subscription content**. It
+**cannot** run on a generic unprivileged OpenShift worker. The `build-qcow2`
+task is therefore `privileged: true` and assumes the node it lands on is a
+**registered RHEL 9/10 builder** with entitlements available. Common patterns:
+
+- A dedicated RHEL builder node, labeled and tainted, that this task tolerates.
+- Entitlement certs mounted into the build pod (Insights / `etc-pki-entitlement`).
+- A standalone RHEL builder VM running the playbook, with Tekton only handling
+  the wrap-and-push stages.
+
+Swap the placeholder builder image in `tekton/pipeline.yaml` (`build-qcow2`
+task) for your entitled image before running.
+
+### One-time setup
+
+Create the two secrets the pipeline expects:
+
+```bash
+# Quay push credentials (a robot account token is ideal)
+oc create secret docker-registry quay-auth \
+  --docker-server=quay.io \
+  --docker-username='ryan_nix+robot' \
+  --docker-password='<robot-token>' \
+  -n <pipeline-namespace>
+
+# Subscription details baked into the firstboot service
+oc create secret generic rhsm-activation \
+  --from-literal=org_id='YOUR_ORG_ID' \
+  --from-literal=activation_key='YOUR_ACTIVATION_KEY' \
+  -n <pipeline-namespace>
+```
+
+Install the pipeline and tasks:
+
+```bash
+oc apply -f tekton/pipeline.yaml
+```
+
+### Run a build
+
+Edit `tekton/pipelinerun-example.yaml` (version, Quay repo, git URL), then:
+
+```bash
+oc create -f tekton/pipelinerun-example.yaml
+tkn pipelinerun logs -f --last   # follow it
+```
+
+Run one PipelineRun per RHEL version, or wire a trigger to loop over your
+target set.
+
+### Boot a VM from the Quay artifact
+
+`manifests/vm-from-containerdisk.yaml` shows both consumption modes:
+
+- **Option A — ephemeral containerDisk:** root disk pulled from Quay onto the
+  node, ephemeral across re-creation. Fast, stateless, ideal for demos and
+  scale-out.
+- **Option B — persistent DataVolume:** CDI imports the registry image into a
+  PVC once (`source: registry:`), root disk survives reboots. This is the
+  golden-image "import once, clone many" pattern.
+
+```bash
+oc apply -f manifests/vm-from-containerdisk.yaml
+```
+
+### Pulling the raw artifact for Proxmox
+
+```bash
+oras pull quay.io/ryan_nix/rhel-containerdisk-raw:9.6
+# → rhel-9.6-x86_64.qcow2 lands in the current dir, then:
+scp rhel-9.6-x86_64.qcow2 root@proxmox:/var/lib/vz/template/qcow/
+```
+
+---
 
 All variables live at the top of `build-images.yml`:
 

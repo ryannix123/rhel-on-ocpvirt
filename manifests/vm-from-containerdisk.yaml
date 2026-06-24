@@ -1,0 +1,107 @@
+---
+# manifests/vm-from-containerdisk.yaml
+#
+# Two ways to consume the Quay artifact the pipeline produced.
+# Pick ONE. Both reference the same image: quay.io/ryan_nix/rhel-containerdisk:9.6
+# =============================================================================
+
+# OPTION A — Ephemeral containerDisk (fast, stateless, great for demos/scale).
+# The root disk is pulled from Quay onto the node and is ephemeral: changes do
+# NOT survive VM re-creation. Pair with cloud-init for per-VM config.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: rhel-96-ephemeral
+  namespace: vms
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: rhel-96-ephemeral
+    spec:
+      domain:
+        cpu:
+          cores: 2
+        memory:
+          guest: 4Gi
+        devices:
+          disks:
+            - name: containerdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: quay.io/ryan_nix/rhel-containerdisk:9.6
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              ssh_authorized_keys:
+                - ssh-ed25519 AAAA... your-key
+---
+# OPTION B — Persistent root via DataVolume (CDI imports the registry image
+# into a PVC once; root disk survives reboots and re-creation). This is the
+# golden-image pattern: import once, clone many.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: rhel-96-persistent
+  namespace: vms
+spec:
+  running: true
+  dataVolumeTemplates:
+    - metadata:
+        name: rhel-96-persistent-root
+      spec:
+        source:
+          registry:
+            url: "docker://quay.io/ryan_nix/rhel-containerdisk:9.6"
+        storage:
+          resources:
+            requests:
+              storage: 20Gi
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: rhel-96-persistent
+    spec:
+      domain:
+        cpu:
+          cores: 2
+        memory:
+          guest: 4Gi
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: rhel-96-persistent-root
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              ssh_authorized_keys:
+                - ssh-ed25519 AAAA... your-key

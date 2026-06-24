@@ -1,0 +1,241 @@
+---
+# tekton/pipeline.yaml
+#
+# OpenShift Pipelines (Tekton) pipeline that:
+#   1. Builds a RHEL qcow2 with image-builder (privileged, on a RHEL builder).
+#   2. Wraps the qcow2 as a KubeVirt containerDisk OCI image.
+#   3. Pushes it to Quay.
+#   4. (Optional) also pushes the raw qcow2 as a generic OCI artifact via oras.
+#
+# IMPORTANT — runner reality:
+#   image-builder needs root + osbuild + real subscription content. The
+#   build-qcow2 task therefore runs PRIVILEGED and expects a node/runner that
+#   is a registered RHEL 9/10 host. On a vanilla OpenShift worker this won't
+#   have entitlements; the common pattern is a dedicated RHEL builder node
+#   (labeled and tainted) or Insights/entitlement certs mounted in. See README.
+#
+# Secrets expected (create these once, see README):
+#   - quay-auth        : dockerconfigjson for quay.io/ryan_nix
+#   - rhsm-activation  : keys: org_id, activation_key  (for the blueprint)
+# -----------------------------------------------------------------------------
+
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: rhel-image-pipeline
+spec:
+  params:
+    - name: rhel-version
+      type: string
+      description: "RHEL version to build, e.g. 9.6"
+      default: "9.6"
+    - name: arch
+      type: string
+      default: "x86_64"
+    - name: quay-repo
+      type: string
+      description: "Target containerDisk repo"
+      default: "quay.io/ryan_nix/rhel-containerdisk"
+    - name: git-url
+      type: string
+      description: "This repo (holds the playbook + Containerfile)"
+    - name: git-revision
+      type: string
+      default: "main"
+    - name: push-raw-artifact
+      type: string
+      description: "Also push raw qcow2 as an oras artifact (true/false)"
+      default: "true"
+
+  workspaces:
+    - name: shared          # source + build output flow between tasks
+    - name: quay-auth       # dockerconfigjson secret
+
+  tasks:
+    - name: clone
+      taskRef:
+        resolver: cluster
+        params:
+          - name: kind
+            value: task
+          - name: name
+            value: git-clone
+          - name: namespace
+            value: openshift-pipelines
+      params:
+        - name: URL
+          value: $(params.git-url)
+        - name: REVISION
+          value: $(params.git-revision)
+      workspaces:
+        - name: output
+          workspace: shared
+
+    - name: build-qcow2
+      runAfter: ["clone"]
+      taskRef:
+        name: build-qcow2
+      params:
+        - name: rhel-version
+          value: $(params.rhel-version)
+        - name: arch
+          value: $(params.arch)
+      workspaces:
+        - name: shared
+          workspace: shared
+
+    - name: build-and-push-containerdisk
+      runAfter: ["build-qcow2"]
+      taskRef:
+        name: build-and-push-containerdisk
+      params:
+        - name: rhel-version
+          value: $(params.rhel-version)
+        - name: arch
+          value: $(params.arch)
+        - name: quay-repo
+          value: $(params.quay-repo)
+      workspaces:
+        - name: shared
+          workspace: shared
+        - name: quay-auth
+          workspace: quay-auth
+
+    - name: push-raw-artifact
+      runAfter: ["build-qcow2"]
+      when:
+        - input: "$(params.push-raw-artifact)"
+          operator: in
+          values: ["true"]
+      taskRef:
+        name: push-raw-artifact
+      params:
+        - name: rhel-version
+          value: $(params.rhel-version)
+        - name: arch
+          value: $(params.arch)
+        - name: quay-repo
+          value: "$(params.quay-repo)-raw"
+      workspaces:
+        - name: shared
+          workspace: shared
+        - name: quay-auth
+          workspace: quay-auth
+
+---
+# Task: build the qcow2 with image-builder via the existing Ansible playbook.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-qcow2
+spec:
+  params:
+    - name: rhel-version
+      type: string
+    - name: arch
+      type: string
+  workspaces:
+    - name: shared
+  steps:
+    - name: ansible-build
+      # A registered RHEL 9/10 image with ansible + image-builder available.
+      # Replace with your entitled builder image.
+      image: registry.redhat.io/rhel9/rhel-bootc:9.6  # placeholder, see README
+      securityContext:
+        privileged: true
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        cd "$(workspaces.shared.path)"
+        # org_id / activation_key come from env injected by the secret below.
+        ansible-playbook -i inventory.ini build-images.yml \
+          -e "target_versions=['$(params.rhel-version)']" \
+          -e "arch=$(params.arch)" \
+          -e "org_id=${ORG_ID}" \
+          -e "activation_key=${ACTIVATION_KEY}" \
+          -e "output_dir=$(workspaces.shared.path)/output"
+      env:
+        - name: ORG_ID
+          valueFrom:
+            secretKeyRef:
+              name: rhsm-activation
+              key: org_id
+        - name: ACTIVATION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: rhsm-activation
+              key: activation_key
+
+---
+# Task: wrap qcow2 into a containerDisk and push to Quay (buildah).
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-and-push-containerdisk
+spec:
+  params:
+    - name: rhel-version
+      type: string
+    - name: arch
+      type: string
+    - name: quay-repo
+      type: string
+  workspaces:
+    - name: shared
+    - name: quay-auth
+  steps:
+    - name: buildah-push
+      image: registry.redhat.io/rhel9/buildah:latest
+      securityContext:
+        privileged: true
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        cd "$(workspaces.shared.path)"
+        QCOW2="output/rhel-$(params.rhel-version)-$(params.arch).qcow2"
+        TAG="$(params.quay-repo):$(params.rhel-version)"
+
+        buildah bud \
+          --build-arg QCOW2="${QCOW2}" \
+          -f Containerfile.containerdisk \
+          -t "${TAG}" .
+
+        buildah push \
+          --authfile "$(workspaces.quay-auth.path)/.dockerconfigjson" \
+          "${TAG}"
+
+        echo "Pushed containerDisk: ${TAG}"
+
+---
+# Task: push the raw qcow2 as a generic OCI artifact with oras.
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: push-raw-artifact
+spec:
+  params:
+    - name: rhel-version
+      type: string
+    - name: arch
+      type: string
+    - name: quay-repo
+      type: string
+  workspaces:
+    - name: shared
+    - name: quay-auth
+  steps:
+    - name: oras-push
+      image: ghcr.io/oras-project/oras:v1.2.0
+      script: |
+        #!/usr/bin/env sh
+        set -eu
+        cd "$(workspaces.shared.path)"
+        QCOW2="output/rhel-$(params.rhel-version)-$(params.arch).qcow2"
+        REF="$(params.quay-repo):$(params.rhel-version)"
+
+        oras push \
+          --registry-config "$(workspaces.quay-auth.path)/.dockerconfigjson" \
+          "${REF}" \
+          "${QCOW2}:application/vnd.qcow2"
+
+        echo "Pushed raw qcow2 artifact: ${REF}"
