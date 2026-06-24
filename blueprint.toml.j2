@@ -1,0 +1,36 @@
+{# templates/blueprint.toml.j2
+   Per-version blueprint. Creates an admin user and a firstboot service that
+   registers the system and pins it to the EUS release + repos. Registration
+   only fires if org_id and activation_key are set. #}
+{%- set major = rhel_version.split('.')[0] -%}
+name = "RHEL {{ rhel_version }}"
+description = "RHEL {{ rhel_version }} qcow2 for Proxmox / Satellite"
+version = "0.0.1"
+
+[[customizations.user]]
+name = "admin"
+description = "Administrator account"
+password = "{{ admin_password_hash }}"
+groups = ["wheel"]
+
+[[customizations.packages]]
+name = "qemu-guest-agent"
+
+[customizations.services]
+enabled = ["qemu-guest-agent"{% if org_id and activation_key %}, "firstboot-single"{% endif %}]
+
+{% if org_id and activation_key %}
+[[customizations.files]]
+path = "/etc/systemd/system/firstboot-single.service"
+data = """
+
+[Service]
+Type=oneshot
+ExecStart=subscription-manager register --org={{ org_id }} --activationkey={{ activation_key }}
+ExecStart=subscription-manager release --set={{ rhel_version }}
+ExecStart=subscription-manager repos --disable=* --enable=rhel-{{ major }}-for-{{ arch }}-appstream-eus-rpms --enable=rhel-{{ major }}-for-{{ arch }}-baseos-eus-rpms
+
+[Install]
+WantedBy=default.target
+"""
+{% endif %}

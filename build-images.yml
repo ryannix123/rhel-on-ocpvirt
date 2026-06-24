@@ -1,0 +1,132 @@
+---
+# build-images.yml
+#
+# Builds qcow2 images for RHEL 8, 9, and 10 using the osbuild-based
+# `image-builder` CLI, then stages them for upload to Proxmox.
+#
+# Run this ON a registered RHEL 9.x or 10.x host (the build host). The
+# image-builder CLI requires a recent RHEL host and an active subscription.
+#
+# Usage:
+#   ansible-playbook build-images.yml
+#   ansible-playbook build-images.yml -e 'target_versions=["9.6","10.2"]'
+#   ansible-playbook build-images.yml -e org_id=XXXX -e activation_key=YYYY
+#
+# NOTE ON RHEL 7: the modern image-builder CLI cannot build RHEL 7 images.
+# RHEL 7 reached end of Maintenance Support in June 2024 (ELS only). See the
+# note at the bottom of this file for how to source a RHEL 7 qcow2 instead.
+
+- name: Build RHEL qcow2 images with image-builder
+  hosts: build_host
+  become: true
+
+  vars:
+    # Versions to build. Each must have a matching repos/rhel-<ver>.json and
+    # blueprints/rhel-<ver>.toml (the playbook templates these if missing).
+    target_versions:
+      - "8.10"
+      - "9.6"
+      - "10.2"
+
+    arch: "x86_64"
+
+    # Subscription details baked into the firstboot service. Override on the
+    # CLI or via vault. Leave empty to skip firstboot registration.
+    org_id: ""
+    activation_key: ""
+
+    # Hashed password for the 'admin' user. Default below is literally
+    # 'changeme' — regenerate with:  openssl passwd -6
+    admin_password_hash: "$6$rounds=656000$abcd1234abcd1234$0K0z3qg0Jp0qK7m1yqxq2qHnQp9w8R7e6t5y4u3i2o1p0a9s8d7f6g5h4j3k2l1zXcVbNmQwErTyUiOpA"
+
+    work_dir: "/var/lib/image-builder-workspace"
+    # Where finished images get copied. Mount/scp this to Proxmox after.
+    output_dir: "/var/lib/image-builder-workspace/output"
+
+  tasks:
+    - name: Ensure host is RHEL 9 or 10
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "RedHat"
+          - ansible_distribution_major_version | int >= 9
+        fail_msg: >-
+          image-builder CLI requires a RHEL 9.x or 10.x build host.
+          This host is {{ ansible_distribution }} {{ ansible_distribution_version }}.
+
+    - name: Install image-builder and qemu tooling
+      ansible.builtin.dnf:
+        name:
+          - image-builder
+          - qemu-img
+        state: present
+
+    - name: Create workspace directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ work_dir }}/repos"
+        - "{{ work_dir }}/blueprints"
+        - "{{ output_dir }}"
+
+    - name: Stage repo definitions for each version
+      ansible.builtin.template:
+        src: "templates/rhel-repos.json.j2"
+        dest: "{{ work_dir }}/repos/rhel-{{ item }}.json"
+        mode: "0644"
+      loop: "{{ target_versions }}"
+      vars:
+        rhel_version: "{{ item }}"
+
+    - name: Stage blueprints for each version
+      ansible.builtin.template:
+        src: "templates/blueprint.toml.j2"
+        dest: "{{ work_dir }}/blueprints/rhel-{{ item }}.toml"
+        mode: "0644"
+      loop: "{{ target_versions }}"
+      vars:
+        rhel_version: "{{ item }}"
+
+    - name: Build each qcow2 image
+      ansible.builtin.command:
+        cmd: >-
+          image-builder build qcow2
+          --distro rhel-{{ item }}
+          --force-repo-dir {{ work_dir }}/repos/
+          --blueprint={{ work_dir }}/blueprints/rhel-{{ item }}.toml
+        chdir: "{{ work_dir }}"
+        creates: "{{ work_dir }}/rhel-{{ item }}-qcow2-{{ arch }}/rhel-{{ item }}-qcow2-{{ arch }}.qcow2"
+      loop: "{{ target_versions }}"
+      register: build_results
+      # Image builds are slow; bump if you hit timeouts.
+      async: 3600
+      poll: 30
+
+    - name: Copy finished images to output dir
+      ansible.builtin.copy:
+        src: "{{ work_dir }}/rhel-{{ item }}-qcow2-{{ arch }}/rhel-{{ item }}-qcow2-{{ arch }}.qcow2"
+        dest: "{{ output_dir }}/rhel-{{ item }}-{{ arch }}.qcow2"
+        remote_src: true
+        mode: "0644"
+        owner: "{{ ansible_env.SUDO_USER | default('root') }}"
+      loop: "{{ target_versions }}"
+
+    - name: Report built images
+      ansible.builtin.debug:
+        msg: >-
+          Built: {{ output_dir }}/rhel-{{ item }}-{{ arch }}.qcow2
+      loop: "{{ target_versions }}"
+
+# ---------------------------------------------------------------------------
+# RHEL 7 IMAGES
+# ---------------------------------------------------------------------------
+# The image-builder CLI shown here cannot target rhel-7.x. Options:
+#   1. Download the official RHEL 7 KVM Guest Image (qcow2) from
+#      access.redhat.com (Downloads > RHEL 7 > "Red Hat Enterprise Linux 7.9
+#      KVM Guest Image") and import that directly into Proxmox.
+#   2. If you need a *customized* RHEL 7 image, use the legacy
+#      lorax-composer / composer-cli on a RHEL 7 host (osbuild-composer is
+#      RHEL 8+). That is a separate workflow from this playbook.
+# Given RHEL 7 is ELS-only, option 1 is almost always the right call.
+# ---------------------------------------------------------------------------

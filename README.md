@@ -1,0 +1,379 @@
+# RHEL qcow2 Image Builder
+
+Ansible automation for building customized **Red Hat Enterprise Linux** qcow2
+images with the osbuild-based `image-builder` CLI, ready to import into
+**Proxmox** and register against **Red Hat Satellite**.
+
+Builds RHEL **8, 9, and 10** (EUS by default). See [RHEL 7](#rhel-7) below for
+why it isn't built here and what to do instead.
+
+Based on the Red Hat Developer article:
+[Build a Red Hat Enterprise Linux EUS image with image-builder CLI](https://developers.redhat.com/articles/2026/06/24/build-red-hat-enterprise-linux-eus-image-image-builder-cli).
+
+---
+
+## ⚠️ Security PSA — read before you commit
+
+Before pushing anything to a public repo:
+
+- **Never commit a real password hash.** The `admin_password_hash` in
+  `build-images.yml` ships as a placeholder for `changeme`. Replace it for your
+  builds, but do not commit your real hash — keep it in a vault file or pass it
+  at runtime.
+- **Never commit `org_id` or `activation_key`.** These are credentials. Pass
+  them with `-e` at runtime or store them in an Ansible Vault file that is
+  **git-ignored**.
+- **Add a `.gitignore`** for vault files, rendered repo JSON/blueprints, and
+  any `*.qcow2` output so secrets and large binaries never get tracked:
+
+  ```gitignore
+  # secrets
+  vault.yml
+  *.vault
+  # generated build inputs
+  repos/
+  blueprints/
+  # image output
+  *.qcow2
+  ```
+
+- **Rotate the activation key** if one is ever exposed — treat a leaked key the
+  same as a leaked password.
+
+---
+
+## What you get
+
+- One qcow2 per RHEL version you target, with `qemu-guest-agent` baked in.
+- An `admin` user in the `wheel` group.
+- An optional firstboot systemd service that registers the system with
+  subscription-manager and pins it to the matching **EUS** release and repos.
+- All build inputs (repo definitions, blueprints) generated from templates, so
+  adding a version is a one-line change.
+
+---
+
+## Repository layout
+
+```
+.
+├── build-images.yml              # main playbook
+├── inventory.ini                 # build host inventory
+└── templates/
+    ├── rhel-repos.json.j2         # per-version CDN repo definition
+    └── blueprint.toml.j2          # per-version image blueprint
+```
+
+---
+
+## Prerequisites
+
+| Requirement | Notes |
+|---|---|
+| **Build host** | A RHEL **9.x or 10.x** machine. The playbook asserts this. |
+| **Subscription** | The build host must be registered (`subscription-manager` or `rhc`) with access to the EUS content you're building. |
+| **Ansible** | 2.14+ on your control machine (or run locally on the build host). |
+| **Packages** | The playbook installs `image-builder` and `qemu-img` for you. |
+| **Disk space** | Each build needs several GB of scratch space in the workspace. |
+
+> The `image-builder` CLI used here **cannot build RHEL 7** — it's RHEL 8+ only.
+
+---
+
+## Quick start
+
+### 1. Clone the repo
+
+```bash
+git clone https://github.com/<your-org>/rhel-image-builder.git
+cd rhel-image-builder
+```
+
+### 2. Generate an admin password hash
+
+The default hash in the playbook is literally `changeme`. Replace it.
+
+```bash
+openssl passwd -6 | pbcopy
+```
+
+Paste the result into `build-images.yml` (`admin_password_hash:`), or better,
+keep it in a vault file and pass it at runtime.
+
+### 3. Point the inventory at your build host
+
+Edit `inventory.ini`. Use `localhost` if you're running on the build host
+itself:
+
+```ini
+[build_host]
+localhost ansible_connection=local
+```
+
+Or target a remote host:
+
+```ini
+[build_host]
+rhel-builder.lab.local ansible_user=admin
+```
+
+### 4. Build the images
+
+Build the defaults (8.10, 9.6, 10.2):
+
+```bash
+ansible-playbook -i inventory.ini build-images.yml
+```
+
+Build a specific set:
+
+```bash
+ansible-playbook -i inventory.ini build-images.yml \
+  -e 'target_versions=["9.6","10.2"]'
+```
+
+Enable firstboot registration + EUS pinning (recommended for Satellite-managed
+hosts):
+
+```bash
+ansible-playbook -i inventory.ini build-images.yml \
+  -e org_id=YOUR_ORG_ID \
+  -e activation_key=YOUR_ACTIVATION_KEY
+```
+
+> If you omit `org_id` and `activation_key`, the firstboot service is skipped
+> entirely and the image boots unregistered.
+
+### 5. Collect the output
+
+Finished images land in:
+
+```
+/var/lib/image-builder-workspace/output/rhel-<ver>-x86_64.qcow2
+```
+
+---
+
+## Importing into Proxmox
+
+Copy the images to your Proxmox host:
+
+```bash
+scp /var/lib/image-builder-workspace/output/*.qcow2 \
+  root@proxmox:/var/lib/vz/template/qcow/
+```
+
+Then import a disk into a VM (replace `<vmid>` and `<storage>`):
+
+```bash
+qm importdisk <vmid> /var/lib/vz/template/qcow/rhel-9.6-x86_64.qcow2 <storage>
+```
+
+Attach the imported disk, set it as the boot disk, and (optionally) convert the
+VM to a template for cloning:
+
+```bash
+qm set <vmid> --scsi0 <storage>:vm-<vmid>-disk-0
+qm set <vmid> --boot order=scsi0
+qm template <vmid>
+```
+
+---
+
+## Running on OpenShift Virtualization
+
+[OpenShift Virtualization](https://docs.redhat.com/en/documentation/openshift_container_platform/latest/html/virtualization/about)
+(KubeVirt) runs these same qcow2 images as VMs alongside your containers. The
+clean path is to import each qcow2 into a **DataVolume** (CDI) backed by a
+PVC, then boot VMs from it. The example below uses
+`virtctl image-upload` to push a local qcow2 into a PVC — no registry required.
+
+### Prerequisites
+
+- OpenShift Virtualization Operator installed and the `HyperConverged` CR
+  deployed.
+- The `virtctl` CLI (`oc get csv -n openshift-cnv` to confirm the version, then
+  download the matching `virtctl`).
+- A default storage class that supports the access mode you need
+  (`ReadWriteMany` is required for live migration).
+
+### 1. Upload the qcow2 into a PVC
+
+`virtctl` handles the upload-proxy plumbing and creates the PVC for you:
+
+```bash
+virtctl image-upload dv rhel-96-golden \
+  --size=20Gi \
+  --image-path=/var/lib/image-builder-workspace/output/rhel-9.6-x86_64.qcow2 \
+  --insecure
+```
+
+Repeat per version (`rhel-810-golden`, `rhel-10-golden`, etc.). Each becomes a
+bootable DataVolume you can clone from.
+
+### 2. (Optional) cloud-init for first boot
+
+The blueprint already bakes in the `admin` user and the firstboot registration
+service, so you may not need cloud-init at all. If you'd rather set the password
+or inject keys at boot, define a cloud-init secret and reference it in the VM's
+`volumes` (shown inline below).
+
+### 3. Define a VirtualMachine
+
+Save as `rhel-96-vm.yaml`. This clones the golden DataVolume so the source PVC
+stays pristine, and enables the guest agent (already baked into the image).
+
+```yaml
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: rhel-96-vm
+  namespace: vms
+spec:
+  running: true
+  template:
+    metadata:
+      labels:
+        kubevirt.io/domain: rhel-96-vm
+    spec:
+      domain:
+        cpu:
+          cores: 2
+        memory:
+          guest: 4Gi
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: rhel-96-vm-root
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              # Optional: image already has the admin user + firstboot service.
+              # Use this only to override at boot.
+              ssh_authorized_keys:
+                - ssh-ed25519 AAAA... your-key
+  dataVolumeTemplates:
+    - metadata:
+        name: rhel-96-vm-root
+      spec:
+        source:
+          pvc:
+            namespace: vms
+            name: rhel-96-golden
+        storage:
+          resources:
+            requests:
+              storage: 20Gi
+```
+
+Apply it:
+
+```bash
+oc apply -f rhel-96-vm.yaml
+```
+
+### 4. Access and verify
+
+```bash
+# Watch it come up
+oc get vm,vmi -n vms
+
+# Serial console
+virtctl console rhel-96-vm -n vms
+
+# SSH (guest agent reports the IP once it's up)
+virtctl ssh admin@rhel-96-vm -n vms
+```
+
+> **Golden image pattern:** keep the uploaded DataVolumes (`*-golden`) as
+> read-only sources and always clone via `dataVolumeTemplates`. That gives you
+> the same reusable-template workflow you'd get from `qm template` in Proxmox,
+> and pairs naturally with Satellite for post-boot registration and
+> content management.
+
+---
+
+## Configuration reference
+
+All variables live at the top of `build-images.yml`:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `target_versions` | `["8.10","9.6","10.2"]` | Versions to build. |
+| `arch` | `x86_64` | Target architecture. |
+| `org_id` | `""` | Subscription org ID for firstboot registration. |
+| `activation_key` | `""` | Activation key for firstboot registration. |
+| `admin_password_hash` | `changeme` hash | SHA-512 hash from `openssl passwd -6`. |
+| `work_dir` | `/var/lib/image-builder-workspace` | Build scratch space. |
+| `output_dir` | `<work_dir>/output` | Where finished qcow2 files are copied. |
+
+### Adding a version
+
+Add the version string to `target_versions`. The playbook templates the repo
+definition and blueprint automatically. EUS CDN paths are derived from the
+version; a `.0` release (e.g. `10.0`) falls back to the GA `dist/` path instead
+of `eus/`.
+
+---
+
+## How it works
+
+1. Asserts the build host is RHEL 9/10.
+2. Installs `image-builder` and `qemu-img`.
+3. Templates a repo JSON and a blueprint TOML per target version.
+4. Runs `image-builder build qcow2` for each version against the custom repo
+   directory.
+5. Copies each resulting qcow2 into the output directory.
+
+The repo JSON points `image-builder` at the EUS CDN content so the build pulls
+the correct minor-version packages. The blueprint's firstboot service then pins
+the *running* system to EUS at first boot, since the build itself uses base
+repos.
+
+---
+
+## RHEL 7
+
+The `image-builder` CLI is osbuild-based and targets **RHEL 8+ only** — it
+cannot produce a `rhel-7.x` image. RHEL 7 also reached end of Maintenance
+Support in June 2024 (ELS only). Two options:
+
+1. **Recommended:** Download the official **RHEL 7.9 KVM Guest Image** (qcow2)
+   from [access.redhat.com](https://access.redhat.com) and import it straight
+   into Proxmox. No build required.
+2. If you need a *customized* RHEL 7 image, use the legacy
+   `lorax-composer` / `composer-cli` on a RHEL 7 host. That's a separate
+   workflow from this repo.
+
+---
+
+## Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---|---|
+| Assert fails on host version | You're not on RHEL 9/10. Move to a supported build host. |
+| `image-builder` not found after install | Confirm the build host subscription includes the repo carrying `image-builder`. |
+| Build times out | Increase the `async:` value in the build task. |
+| Empty/unregistered image | `org_id` / `activation_key` not passed — firstboot service is skipped by design. |
+| 404 pulling repo metadata | The targeted minor has no EUS repos. Use a real EUS minor or a `.0` GA release. |
+
+---
+
+## License
+
+Provided as-is. Adapt freely for your environment.
