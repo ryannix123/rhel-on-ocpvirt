@@ -8,8 +8,10 @@ Ansible automation for building customized **Red Hat Enterprise Linux** qcow2
 images with the osbuild-based `image-builder` CLI, ready to import into
 **Proxmox** and register against **Red Hat Satellite**.
 
-Builds RHEL **8, 9, and 10** (EUS by default). See [RHEL 7](#rhel-7) below for
-why it isn't built here and what to do instead.
+Builds RHEL **9 and 10** (EUS by default) out of the box; **8.10** is supported
+but omitted from the defaults because it requires a RHEL 8-entitled builder (see
+[Which versions can this builder build?](#which-versions-can-this-builder-build)).
+See [RHEL 7](#rhel-7) below for why 7.x isn't built here and what to do instead.
 
 Based on the Red Hat Developer article:
 [Build a Red Hat Enterprise Linux EUS image with image-builder CLI](https://developers.redhat.com/articles/2026/06/24/build-red-hat-enterprise-linux-eus-image-image-builder-cli).
@@ -87,6 +89,32 @@ Before pushing anything to a public repo:
 | **Disk space** | Each build needs several GB of scratch space in the workspace. |
 
 > The `image-builder` CLI used here **cannot build RHEL 7** — it's RHEL 8+ only.
+
+---
+
+## Which versions can this builder build?
+
+A builder can only compose a RHEL version **its own subscription entitles it
+to**. This is per-host, not per-account — even if your Red Hat account has broad
+entitlements, a given builder VM only sees the content its subscription actually
+enables. Check what a builder can reach before adding versions:
+
+```bash
+subscription-manager repos --list | grep -E 'rhel-(8|9|10)'
+```
+
+The practical consequences:
+
+- A **RHEL 10** builder entitles RHEL 10 content. It builds 10.x cleanly, and
+  typically 9.x as well, but has **no RHEL 8 repos** — an 8.10 build fails at
+  metadata download (`All mirrors were tried`).
+- To build **8.10**, run on a host whose subscription includes RHEL 8 EUS, or
+  enable those repos there. That's why 8.10 ships commented out of the defaults
+  rather than removed — add it back on the right builder.
+
+If a build dies with a 404 or "All mirrors were tried" on the repo metadata
+step, this is almost always the cause: the builder isn't entitled to that
+version, not a bug in the templates.
 
 ---
 
@@ -196,7 +224,7 @@ rhel-builder.lab.local ansible_user=admin
 
 ### 4. Build the images
 
-Build the defaults (8.10, 9.6, 10.2):
+Build the defaults (9.6, 10.2):
 
 ```bash
 ansible-playbook -i inventory.ini build-images.yml
@@ -208,6 +236,9 @@ Build a specific set:
 ansible-playbook -i inventory.ini build-images.yml \
   -e 'target_versions=["9.6","10.2"]'
 ```
+
+> Building 8.10 as well? Your builder must be entitled to RHEL 8 EUS content —
+> see [Which versions can this builder build?](#which-versions-can-this-builder-build).
 
 Enable firstboot registration + EUS pinning (recommended for Satellite-managed
 hosts):
@@ -489,7 +520,7 @@ All variables live at the top of `build-images.yml`:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `target_versions` | `["8.10","9.6","10.2"]` | Versions to build. |
+| `target_versions` | `["9.6","10.2"]` | Versions to build. Add `"8.10"` on a RHEL 8-entitled builder. |
 | `arch` | `x86_64` | Target architecture. |
 | `org_id` | `""` | Subscription org ID for firstboot registration. |
 | `activation_key` | `""` | Activation key for firstboot registration. |
@@ -521,6 +552,25 @@ the correct minor-version packages. The blueprint's firstboot service then pins
 the *running* system to EUS at first boot, since the build itself uses base
 repos.
 
+### A note on `check_gpg: false`
+
+The generated repo definitions set `check_gpg: false`. This is a deliberate
+workaround, not a shortcut. Current Red Hat `redhat-release` packages ship a
+**V6-format (Post-Quantum Cryptography) GPG key** that the osbuild worker's
+`rpmkeys` cannot yet import, so a build with GPG checking on fails at the
+`org.osbuild.rpm` stage with:
+
+```
+warning: Unsupported version of key: V6
+error: /tmp/gpgkey...: key 3 import failed.
+```
+
+This is a known osbuild/tooling lag ([Red Hat Access Solution 7136467](https://access.redhat.com/solutions/7136467)),
+not a content problem — packages still come from Red Hat's official CDN over
+authenticated TLS (`rhsm: true`), so transport is trusted; only per-package
+signature verification is skipped **at build time**. Re-enable `check_gpg` once
+your builder's osbuild stack can parse V6 keys.
+
 ---
 
 ## RHEL 7
@@ -547,6 +597,9 @@ Support in June 2024 (ELS only). Two options:
 | Build times out | Increase the `async:` value in the build task. |
 | Empty/unregistered image | `org_id` / `activation_key` not passed — firstboot service is skipped by design. |
 | 404 pulling repo metadata | The targeted minor has no EUS repos. Use a real EUS minor or a `.0` GA release. |
+| `All mirrors were tried` on metadata | The builder isn't entitled to that RHEL version. See [Which versions can this builder build?](#which-versions-can-this-builder-build). |
+| `Unsupported version of key: V6` / `key import failed` | osbuild can't parse Red Hat's V6 PQC GPG key. Handled by `check_gpg: false` in the repo template (RH Solution 7136467); if you re-enabled GPG checking, that's why it broke. |
+| `sudo: a password is required` on Gathering Facts | The builder's SSH user needs passwordless sudo. Add `/etc/sudoers.d/<user>-nopasswd`, or run the playbook with `-K`, or as root. |
 
 ---
 
