@@ -23,8 +23,13 @@
   vars:
     # Versions to build. Each must have a matching repos/rhel-<ver>.json and
     # blueprints/rhel-<ver>.toml (the playbook templates these if missing).
+    #
+    # The builder can only build versions its subscription entitles. A RHEL 10
+    # host entitles RHEL 10 content; RHEL 8/9 EUS require a host whose
+    # subscription includes those repos (check: subscription-manager repos
+    # --list | grep rhel-8). 8.10 is omitted here because it needs a
+    # RHEL 8-entitled builder; add it back when building on such a host.
     target_versions:
-      - "8.10"
       - "9.6"
       - "10.2"
 
