@@ -1,0 +1,71 @@
+---
+# RHEL 7 has no built-in auto-updating boot source (and 7.9 is the final
+# release anyway), so it's a one-time upload. See README for the
+# virtctl image-upload command that creates the rhel7-base DataVolume/PVC
+# this DataSource points at.
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataSource
+metadata:
+  name: rhel7
+  namespace: rhel-fleet
+spec:
+  source:
+    pvc:
+      name: rhel7-base
+      namespace: rhel-fleet
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: rhel7-01
+  namespace: rhel-fleet
+  labels:
+    app: rhel-fleet
+    os: rhel7
+spec:
+  runStrategy: Always
+  instancetype:
+    name: u1.medium
+  preference:
+    name: rhel.7
+  dataVolumeTemplates:
+    - metadata:
+        name: rhel7-01-rootdisk
+      spec:
+        sourceRef:
+          kind: DataSource
+          name: rhel7 # local DataSource above (clones the rhel7-base PVC)
+          namespace: rhel-fleet
+        storage:
+          resources:
+            requests:
+              storage: 30Gi
+  template:
+    metadata:
+      labels:
+        app: rhel-fleet
+        os: rhel7
+    spec:
+      domain:
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: rhel7-01-rootdisk
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            secretRef:
+              name: cloudinit-rhel7

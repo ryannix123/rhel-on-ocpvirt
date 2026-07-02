@@ -1,0 +1,56 @@
+---
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: rhel9-01
+  namespace: rhel-fleet
+  labels:
+    app: rhel-fleet
+    os: rhel9
+spec:
+  runStrategy: Always
+  instancetype:
+    name: u1.medium # 1 vCPU / 4Gi; do NOT also set domain cpu/memory
+  preference:
+    name: rhel.9
+  dataVolumeTemplates:
+    - metadata:
+        name: rhel9-01-rootdisk
+      spec:
+        sourceRef:
+          kind: DataSource
+          name: rhel9 # built-in auto-updating boot source
+          namespace: openshift-virtualization-os-images
+        storage:
+          resources:
+            requests:
+              storage: 30Gi
+  template:
+    metadata:
+      labels:
+        app: rhel-fleet
+        os: rhel9
+    spec:
+      domain:
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: rhel9-01-rootdisk
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            secretRef:
+              name: cloudinit-rhel9 # created by create-registration-secrets.sh
