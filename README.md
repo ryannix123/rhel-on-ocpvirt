@@ -1,608 +1,116 @@
-<p align="center">
-  <img src="docs/banner.svg" alt="RHEL Image Builder — build once, ship to Quay, OpenShift Virtualization, and Proxmox, governed by Red Hat Satellite" width="100%">
-</p>
-
-# RHEL qcow2 Image Builder
-
-Ansible automation for building customized **Red Hat Enterprise Linux** qcow2
-images with the osbuild-based `image-builder` CLI, ready to import into
-**Proxmox** and register against **Red Hat Satellite**.
-
-Builds RHEL **9 and 10** (EUS by default) out of the box; **8.10** is supported
-but omitted from the defaults because it requires a RHEL 8-entitled builder (see
-[Which versions can this builder build?](#which-versions-can-this-builder-build)).
-See [RHEL 7](#rhel-7) below for why 7.x isn't built here and what to do instead.
-
-Based on the Red Hat Developer article:
-[Build a Red Hat Enterprise Linux EUS image with image-builder CLI](https://developers.redhat.com/articles/2026/06/24/build-red-hat-enterprise-linux-eus-image-image-builder-cli).
-
----
-
-## ⚠️ Security PSA — read before you commit
-
-Before pushing anything to a public repo:
-
-- **No password is baked into the image.** The `admin` user is SSH-key-only,
-  so there's no credential to leak in the first place. The playbook reads your
-  public key at runtime — never commit private keys, and the matching private
-  key never enters this repo.
-- **Never commit `org_id` or `activation_key`.** These are credentials. Pass
-  them with `-e` at runtime or store them in an Ansible Vault file that is
-  **git-ignored**.
-- **Add a `.gitignore`** for vault files, rendered repo JSON/blueprints, and
-  any `*.qcow2` output so secrets and large binaries never get tracked:
-
-  ```gitignore
-  # secrets
-  vault.yml
-  *.vault
-  # generated build inputs
-  repos/
-  blueprints/
-  # image output
-  *.qcow2
-  ```
-
-- **Rotate the activation key** if one is ever exposed — treat a leaked key the
-  same as a leaked password.
-
----
-
-## What you get
-
-- One qcow2 per RHEL version you target, with `qemu-guest-agent` baked in.
-- An `admin` user with **SSH key auth (no password)** and passwordless sudo.
-- An optional firstboot systemd service that registers the system with
-  subscription-manager and pins it to the matching **EUS** release and repos.
-- All build inputs (repo definitions, blueprints) generated from templates, so
-  adding a version is a one-line change.
-
----
-
-## Repository layout
-
-```
-.
-├── build-images.yml              # main playbook
-├── inventory.ini                 # build host inventory
-├── Containerfile.containerdisk   # wraps a qcow2 into a KubeVirt containerDisk
-├── templates/
-│   ├── rhel-repos.json.j2         # per-version CDN repo definition
-│   └── blueprint.toml.j2          # per-version image blueprint
-├── tekton/
-│   ├── pipeline.yaml              # build → wrap → push-to-Quay pipeline
-│   └── pipelinerun-example.yaml   # trigger a build for one version
-└── manifests/
-    └── vm-from-containerdisk.yaml # boot a VM from the Quay artifact
-```
-
----
-
-## Prerequisites
-
-| Requirement | Notes |
-|---|---|
-| **Build host** | A RHEL **9.x or 10.x** machine. The playbook asserts this. |
-| **Subscription** | The build host must be registered (`subscription-manager` or `rhc`) with access to the EUS content you're building. |
-| **Ansible** | 2.14+ on your control machine (or run locally on the build host). |
-| **Packages** | The playbook installs `image-builder` and `qemu-img` for you. |
-| **Disk space** | Each build needs several GB of scratch space in the workspace. |
-
-> The `image-builder` CLI used here **cannot build RHEL 7** — it's RHEL 8+ only.
-
----
-
-## Which versions can this builder build?
-
-A builder can only compose a RHEL version **its own subscription entitles it
-to**. This is per-host, not per-account — even if your Red Hat account has broad
-entitlements, a given builder VM only sees the content its subscription actually
-enables. Check what a builder can reach before adding versions:
-
-```bash
-subscription-manager repos --list | grep -E 'rhel-(8|9|10)'
-```
-
-The practical consequences:
-
-- A **RHEL 10** builder entitles RHEL 10 content. It builds 10.x cleanly, and
-  typically 9.x as well, but has **no RHEL 8 repos** — an 8.10 build fails at
-  metadata download (`All mirrors were tried`).
-- To build **8.10**, run on a host whose subscription includes RHEL 8 EUS, or
-  enable those repos there. That's why 8.10 ships commented out of the defaults
-  rather than removed — add it back on the right builder.
-
-If a build dies with a 404 or "All mirrors were tried" on the repo metadata
-step, this is almost always the cause: the builder isn't entitled to that
-version, not a bug in the templates.
-
----
-
-## Where do I run what?
-
-**The image build must run on a RHEL 9/10 host.** `image-builder` depends on
-osbuild and entitled subscription content, which exist only on a registered
-RHEL machine — it cannot run on macOS or on an unsubscribed Linux box. The
-easiest builder is a small RHEL VM on **Proxmox** or **OpenShift
-Virtualization**, registered with `subscription-manager`. You drive everything
-else from your workstation over SSH.
-
-| Command / step | Run it on | Why |
-|---|---|---|
-| `git`, editing files | **Your workstation** (Mac/Linux) | Normal dev loop. |
-| `ssh-keygen -t ed25519` (if you lack a key) | **Your workstation** | The playbook injects your *public* key into the image. |
-| `ssh` into the builder | **Your workstation → builder** | You operate the builder remotely. |
-| `ansible-playbook ... build-images.yml` | **RHEL 9/10 builder** | This invokes `image-builder` — RHEL-only. |
-| `oc` / `tkn` / `virtctl` (cluster, pipeline, VMs) | **Your workstation** | Talk to OpenShift remotely. |
-| `oras pull` (fetch qcow2 for Proxmox) | **Your workstation** or Proxmox host | Just downloads the artifact. |
-| `qm importdisk` (Proxmox import) | **Proxmox host** | Proxmox CLI lives there. |
-
-> **About `pbcopy`:** it's a macOS-only convenience for copying command output
-> to your clipboard. **None of this repo's commands require it** — they write
-> files and push images, not clipboard text. (Earlier versions used it for a
-> password-hash step; that's gone now that login is SSH-key-only.) On a Linux
-> builder the clipboard equivalents are `xclip -selection clipboard` or
-> `wl-copy`, but you rarely need them since you work over SSH with file output.
-
-### Typical flow across machines
-
-```text
-┌─ Your Mac ───────────────────────────────────────────────┐
-│  git clone / edit                                         │
-│  ssh-keygen -t ed25519   (only if you don't have a key)   │
-│  ssh admin@rhel-builder ──────────────────────────────────┼──┐
-└───────────────────────────────────────────────────────────┘  │
-                                                                ▼
-┌─ RHEL 9/10 builder (Proxmox or OpenShift Virt VM) ────────────┐
-│  ansible-playbook -i inventory.ini build-images.yml ...        │
-│  (reads your ~/.ssh/id_ed25519.pub, bakes it into the image)   │
-│  → produces output/rhel-<ver>-x86_64.qcow2                     │
-└────────────────────────────────────────────────────────────────┘
-                                                                ▲
-┌─ Your Mac ──────────────────────────────────────────────────┐ │
-│  oc apply -f manifests/vm-from-containerdisk.yaml  (OpenShift)│ │
-│  oras pull ... ; scp to Proxmox ; qm importdisk    (Proxmox) ─┼─┘
-└──────────────────────────────────────────────────────────────┘
-```
-
-> Running the Tekton pipeline instead? Then the build happens **inside the
-> cluster** on an entitled RHEL builder node, and you only need `oc`/`tkn` from
-> your workstation — no manual SSH. See
-> [Pipeline: build once, store in Quay](#pipeline-build-once-store-in-quay-boot-anywhere).
-
----
-
-## Quick start
-
-### 1. Clone the repo
-
-```bash
-git clone https://github.com/<your-org>/rhel-image-builder.git
-cd rhel-image-builder
-```
-
-### 2. Make sure you have an SSH key
-
-The image is **key-auth only** — no password. The playbook injects your public
-key into the `admin` user automatically. If you don't already have a key, make
-one **on your workstation**:
-
-```bash
-ssh-keygen -t ed25519
-```
-
-By default the playbook reads `~/.ssh/id_ed25519.pub`. To use a different key,
-point it at one (or pass the key inline):
-
-```bash
-# use a specific key file
-ansible-playbook ... -e admin_ssh_key_file=~/.ssh/id_rsa.pub
-
-# or pass the key string directly
-ansible-playbook ... -e admin_ssh_key="ssh-ed25519 AAAA... you@host"
-```
-
-No password to generate, paste, or commit — the matching private key never
-enters this repo.
-
-### 3. Point the inventory at your build host
-
-Edit `inventory.ini`. Use `localhost` if you're running on the build host
-itself:
-
-```ini
-[build_host]
-localhost ansible_connection=local
-```
-
-Or target a remote host:
-
-```ini
-[build_host]
-rhel-builder.lab.local ansible_user=admin
-```
-
-### 4. Build the images
-
-Build the defaults (9.6, 10.2):
-
-```bash
-ansible-playbook -i inventory.ini build-images.yml
-```
-
-Build a specific set:
-
-```bash
-ansible-playbook -i inventory.ini build-images.yml \
-  -e 'target_versions=["9.6","10.2"]'
-```
-
-> Building 8.10 as well? Your builder must be entitled to RHEL 8 EUS content —
-> see [Which versions can this builder build?](#which-versions-can-this-builder-build).
-
-Enable firstboot registration + EUS pinning (recommended for Satellite-managed
-hosts):
-
-```bash
-ansible-playbook -i inventory.ini build-images.yml \
-  -e org_id=YOUR_ORG_ID \
-  -e activation_key=YOUR_ACTIVATION_KEY
-```
-
-> If you omit `org_id` and `activation_key`, the firstboot service is skipped
-> entirely and the image boots unregistered.
-
-### 5. Collect the output
-
-Finished images land in:
-
-```
-/var/lib/image-builder-workspace/output/rhel-<ver>-x86_64.qcow2
-```
-
----
-
-## Importing into Proxmox
-
-Copy the images to your Proxmox host:
-
-```bash
-scp /var/lib/image-builder-workspace/output/*.qcow2 \
-  root@proxmox:/var/lib/vz/template/qcow/
-```
-
-Then import a disk into a VM (replace `<vmid>` and `<storage>`):
-
-```bash
-qm importdisk <vmid> /var/lib/vz/template/qcow/rhel-9.6-x86_64.qcow2 <storage>
-```
-
-Attach the imported disk, set it as the boot disk, and (optionally) convert the
-VM to a template for cloning:
-
-```bash
-qm set <vmid> --scsi0 <storage>:vm-<vmid>-disk-0
-qm set <vmid> --boot order=scsi0
-qm template <vmid>
-```
-
----
-
-## Running on OpenShift Virtualization
-
-[OpenShift Virtualization](https://docs.redhat.com/en/documentation/openshift_container_platform/latest/html/virtualization/about)
-(KubeVirt) runs these same qcow2 images as VMs alongside your containers. The
-clean path is to import each qcow2 into a **DataVolume** (CDI) backed by a
-PVC, then boot VMs from it. The example below uses
-`virtctl image-upload` to push a local qcow2 into a PVC — no registry required.
-
-### Prerequisites
-
-- OpenShift Virtualization Operator installed and the `HyperConverged` CR
-  deployed.
-- The `virtctl` CLI (`oc get csv -n openshift-cnv` to confirm the version, then
-  download the matching `virtctl`).
-- A default storage class that supports the access mode you need
-  (`ReadWriteMany` is required for live migration).
-
-### 1. Upload the qcow2 into a PVC
-
-`virtctl` handles the upload-proxy plumbing and creates the PVC for you:
-
-```bash
-virtctl image-upload dv rhel-96-golden \
-  --size=20Gi \
-  --image-path=/var/lib/image-builder-workspace/output/rhel-9.6-x86_64.qcow2 \
-  --insecure
-```
-
-Repeat per version (`rhel-810-golden`, `rhel-10-golden`, etc.). Each becomes a
-bootable DataVolume you can clone from.
-
-### 2. (Optional) cloud-init for first boot
-
-The blueprint already bakes in the `admin` user and the firstboot registration
-service, so you may not need cloud-init at all. If you'd rather set the password
-or inject keys at boot, define a cloud-init secret and reference it in the VM's
-`volumes` (shown inline below).
-
-### 3. Define a VirtualMachine
-
-Save as `rhel-96-vm.yaml`. This clones the golden DataVolume so the source PVC
-stays pristine, and enables the guest agent (already baked into the image).
-
-```yaml
-apiVersion: kubevirt.io/v1
-kind: VirtualMachine
-metadata:
-  name: rhel-96-vm
-  namespace: vms
-spec:
-  running: true
-  template:
-    metadata:
-      labels:
-        kubevirt.io/domain: rhel-96-vm
-    spec:
-      domain:
-        cpu:
-          cores: 2
-        memory:
-          guest: 4Gi
-        devices:
-          disks:
-            - name: rootdisk
-              disk:
-                bus: virtio
-            - name: cloudinitdisk
-              disk:
-                bus: virtio
-          interfaces:
-            - name: default
-              masquerade: {}
-      networks:
-        - name: default
-          pod: {}
-      volumes:
-        - name: rootdisk
-          dataVolume:
-            name: rhel-96-vm-root
-        - name: cloudinitdisk
-          cloudInitNoCloud:
-            userData: |
-              #cloud-config
-              # Optional: image already has the admin user + firstboot service.
-              # Use this only to override at boot.
-              ssh_authorized_keys:
-                - ssh-ed25519 AAAA... your-key
-  dataVolumeTemplates:
-    - metadata:
-        name: rhel-96-vm-root
-      spec:
-        source:
-          pvc:
-            namespace: vms
-            name: rhel-96-golden
-        storage:
-          resources:
-            requests:
-              storage: 20Gi
-```
-
-Apply it:
-
-```bash
-oc apply -f rhel-96-vm.yaml
-```
-
-### 4. Access and verify
-
-```bash
-# Watch it come up
-oc get vm,vmi -n vms
-
-# Serial console
-virtctl console rhel-96-vm -n vms
-
-# SSH (guest agent reports the IP once it's up)
-virtctl ssh admin@rhel-96-vm -n vms
-```
-
-> **Golden image pattern:** keep the uploaded DataVolumes (`*-golden`) as
-> read-only sources and always clone via `dataVolumeTemplates`. That gives you
-> the same reusable-template workflow you'd get from `qm template` in Proxmox,
-> and pairs naturally with Satellite for post-boot registration and
-> content management.
-
----
-
-## Pipeline: build once, store in Quay, boot anywhere
-
-You can offload the whole build to **OpenShift Pipelines (Tekton)** and store
-the result in **Quay**, so VMs are sourced from a versioned, centrally-managed
-artifact instead of a qcow2 someone built on a laptop. That registry-as-source-
-of-truth model *is* the supply-chain improvement story — the same posture
-Satellite enforces for running hosts, applied to your golden images.
-
-### How a qcow2 lives in Quay
-
-A qcow2 is a VM disk, not a container image — so it can't go into Quay as-is.
-The pipeline produces **two** artifacts from one build, and you choose how to
-consume them:
-
-| Artifact | What it is | Who consumes it |
-|---|---|---|
-| **containerDisk** (`...:9.6`) | qcow2 baked into a `FROM scratch` OCI image at `/disk/` | OpenShift Virt — boots directly, no download step |
-| **raw qcow2** (`...-raw:9.6`) | the qcow2 pushed as a generic OCI artifact via `oras` | Proxmox — `oras pull`, then `qm importdisk` |
-
-The containerDisk is the native path for OpenShift Virtualization. The raw
-artifact exists so Proxmox (which can't boot from a registry) can still pull a
-governed, versioned image instead of a loose file.
-
-### ⚠️ Runner reality — read this first
-
-`image-builder` needs **root, osbuild, and entitled subscription content**. It
-**cannot** run on a generic unprivileged OpenShift worker. The `build-qcow2`
-task is therefore `privileged: true` and assumes the node it lands on is a
-**registered RHEL 9/10 builder** with entitlements available. Common patterns:
-
-- A dedicated RHEL builder node, labeled and tainted, that this task tolerates.
-- Entitlement certs mounted into the build pod (Insights / `etc-pki-entitlement`).
-- A standalone RHEL builder VM running the playbook, with Tekton only handling
-  the wrap-and-push stages.
-
-Swap the placeholder builder image in `tekton/pipeline.yaml` (`build-qcow2`
-task) for your entitled image before running.
-
-### One-time setup
-
-Create the two secrets the pipeline expects:
-
-```bash
-# Quay push credentials (a robot account token is ideal)
-oc create secret docker-registry quay-auth \
-  --docker-server=quay.io \
-  --docker-username='ryan_nix+robot' \
-  --docker-password='<robot-token>' \
-  -n <pipeline-namespace>
-
-# Subscription details baked into the firstboot service
-oc create secret generic rhsm-activation \
-  --from-literal=org_id='YOUR_ORG_ID' \
-  --from-literal=activation_key='YOUR_ACTIVATION_KEY' \
-  -n <pipeline-namespace>
-```
-
-Install the pipeline and tasks:
-
-```bash
-oc apply -f tekton/pipeline.yaml
-```
-
-### Run a build
-
-Edit `tekton/pipelinerun-example.yaml` (version, Quay repo, git URL), then:
-
-```bash
-oc create -f tekton/pipelinerun-example.yaml
-tkn pipelinerun logs -f --last   # follow it
-```
-
-Run one PipelineRun per RHEL version, or wire a trigger to loop over your
-target set.
-
-### Boot a VM from the Quay artifact
-
-`manifests/vm-from-containerdisk.yaml` shows both consumption modes:
-
-- **Option A — ephemeral containerDisk:** root disk pulled from Quay onto the
-  node, ephemeral across re-creation. Fast, stateless, ideal for demos and
-  scale-out.
-- **Option B — persistent DataVolume:** CDI imports the registry image into a
-  PVC once (`source: registry:`), root disk survives reboots. This is the
-  golden-image "import once, clone many" pattern.
-
-```bash
-oc apply -f manifests/vm-from-containerdisk.yaml
-```
-
-### Pulling the raw artifact for Proxmox
-
-```bash
-oras pull quay.io/ryan_nix/rhel-containerdisk-raw:9.6
-# → rhel-9.6-x86_64.qcow2 lands in the current dir, then:
-scp rhel-9.6-x86_64.qcow2 root@proxmox:/var/lib/vz/template/qcow/
-```
-
----
-
-All variables live at the top of `build-images.yml`:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `target_versions` | `["9.6","10.2"]` | Versions to build. Add `"8.10"` on a RHEL 8-entitled builder. |
-| `arch` | `x86_64` | Target architecture. |
-| `org_id` | `""` | Subscription org ID for firstboot registration. |
-| `activation_key` | `""` | Activation key for firstboot registration. |
-| `admin_ssh_key` | `""` | SSH public key string. If empty, read from `admin_ssh_key_file`. |
-| `admin_ssh_key_file` | `~/.ssh/id_ed25519.pub` | Public key file read at runtime when `admin_ssh_key` is unset. |
-| `work_dir` | `/var/lib/image-builder-workspace` | Build scratch space. |
-| `output_dir` | `<work_dir>/output` | Where finished qcow2 files are copied. |
-
-### Adding a version
-
-Add the version string to `target_versions`. The playbook templates the repo
-definition and blueprint automatically. EUS CDN paths are derived from the
-version; a `.0` release (e.g. `10.0`) falls back to the GA `dist/` path instead
-of `eus/`.
-
----
+# Satellite-Ready RHEL qcow2 Builder (Hosted Image Builder)
+
+Composes RHEL 8, 9, and 10 guest images (qcow2) using **Red Hat's hosted
+Image Builder** (console.redhat.com), driven from GitHub Actions, with a
+firstboot systemd unit baked in that auto-registers each VM to
+**Satellite 6.19**.
 
 ## How it works
 
-1. Asserts the build host is RHEL 9/10.
-2. Installs `image-builder` and `qemu-img`.
-3. Templates a repo JSON and a blueprint TOML per target version.
-4. Runs `image-builder build qcow2` for each version against the custom repo
-   directory.
-5. Copies each resulting qcow2 into the output directory.
-
-The repo JSON points `image-builder` at the EUS CDN content so the build pulls
-the correct minor-version packages. The blueprint's firstboot service then pins
-the *running* system to EUS at first boot, since the build itself uses base
-repos.
-
-### A note on `check_gpg: false`
-
-The generated repo definitions set `check_gpg: false`. This is a deliberate
-workaround, not a shortcut. Current Red Hat `redhat-release` packages ship a
-**V6-format (Post-Quantum Cryptography) GPG key** that the osbuild worker's
-`rpmkeys` cannot yet import, so a build with GPG checking on fails at the
-`org.osbuild.rpm` stage with:
-
 ```
-warning: Unsupported version of key: V6
-error: /tmp/gpgkey...: key 3 import failed.
+GitHub Actions (ubuntu-latest, free tier)
+  ├─ Authenticate to console.redhat.com (service account or offline token)
+  ├─ POST /api/image-builder/v1/compose
+  │    distribution: rhel-8|9|10, image_type: guest-image
+  │    customizations.files:
+  │      /etc/satellite-register/satellite-register.sh
+  │      /etc/sysconfig/satellite-register        (URL, org, AK, JWT)
+  │      /etc/systemd/system/satellite-register.service
+  │    customizations.services.enabled: [satellite-register]
+  ├─ Poll /composes/{id} until success (Red Hat builds it via osbuild)
+  ├─ Download the presigned qcow2 URL immediately
+  └─ zstd-compress and upload as workflow artifact
+
+First boot on YOUR network
+  └─ satellite-register.service (oneshot, network-online, stamp-guarded)
+       curls https://satellite.example.com/register?activation_keys=...
+       with Bearer JWT, pipes generated script to bash
+       → CA installed, subscription-manager registered, host in Satellite
 ```
 
-This is a known osbuild/tooling lag ([Red Hat Access Solution 7136467](https://access.redhat.com/solutions/7136467)),
-not a content problem — packages still come from Red Hat's official CDN over
-authenticated TLS (`rhsm: true`), so transport is trusted; only per-package
-signature verification is skipped **at build time**. Re-enable `check_gpg` once
-your builder's osbuild stack can parse V6 keys.
+**Your Satellite never needs to be publicly reachable.** Neither the hosted
+Image Builder nor GitHub ever contacts it — `satellite.example.com` only has
+to resolve on the network where the VM boots. If a VM boots somewhere
+Satellite *isn't* reachable, the unit fails softly and re-arms for the next
+boot (a stamp file at `/var/lib/satellite-register.done` disarms it after
+success).
 
----
+## One-time setup
 
-## RHEL 7
+### 1. console.redhat.com credentials (pick one)
 
-The `image-builder` CLI is osbuild-based and targets **RHEL 8+ only** — it
-cannot produce a `rhel-7.x` image. RHEL 7 also reached end of Maintenance
-Support in June 2024 (ELS only). Two options:
+**Preferred — service account:** console.redhat.com → Identity & Access
+Management → Service Accounts → create one, grant it Image Builder access
+via a group/role. Store as secrets `RH_SA_CLIENT_ID` and
+`RH_SA_CLIENT_SECRET`. (The workflow requests `scope=api.console`.)
 
-1. **Recommended:** Download the official **RHEL 7.9 KVM Guest Image** (qcow2)
-   from [access.redhat.com](https://access.redhat.com) and import it straight
-   into Proxmox. No build required.
-2. If you need a *customized* RHEL 7 image, use the legacy
-   `lorax-composer` / `composer-cli` on a RHEL 7 host. That's a separate
-   workflow from this repo.
+**Fallback — offline token:** generate at
+<https://access.redhat.com/management/api>, store as `RH_OFFLINE_TOKEN`.
+Offline tokens expire after 30 days of *inactivity*; the monthly cron keeps
+it warm. Red Hat is steering console API auth toward service accounts, so
+prefer that.
 
----
+### 2. Satellite registration token (JWT)
 
-## Troubleshooting
+Satellite 6.19: **Hosts → Register Host**, set a token lifetime long enough
+to cover the deployment life of your images, generate, and copy the JWT
+from the `Authorization: Bearer` header of the generated command (or use
+`hammer host-registration generate-command`). Store as `SATELLITE_REG_JWT`.
 
-| Symptom | Likely cause / fix |
+**Security note:** the JWT and activation key are sent to Red Hat's hosted
+service inside the compose request and embedded in the image (briefly
+staged on Red Hat's S3 behind a presigned URL). The JWT can only register
+hosts, but treat artifacts as internal, use a dedicated Satellite user with
+a minimal registration role, and pick a sane token lifetime. The firstboot
+script scrubs the JWT from the guest after successful registration.
+
+### 3. Repository variables and activation keys
+
+| Variable | Example |
 |---|---|
-| Assert fails on host version | You're not on RHEL 9/10. Move to a supported build host. |
-| `image-builder` not found after install | Confirm the build host subscription includes the repo carrying `image-builder`. |
-| Build times out | Increase the `async:` value in the build task. |
-| Empty/unregistered image | `org_id` / `activation_key` not passed — firstboot service is skipped by design. |
-| 404 pulling repo metadata | The targeted minor has no EUS repos. Use a real EUS minor or a `.0` GA release. |
-| `All mirrors were tried` on metadata | The builder isn't entitled to that RHEL version. See [Which versions can this builder build?](#which-versions-can-this-builder-build). |
-| `Unsupported version of key: V6` / `key import failed` | osbuild can't parse Red Hat's V6 PQC GPG key. Handled by `check_gpg: false` in the repo template (RH Solution 7136467); if you re-enabled GPG checking, that's why it broke. |
-| `sudo: a password is required` on Gathering Facts | The builder's SSH user needs passwordless sudo. Add `/etc/sudoers.d/<user>-nopasswd`, or run the playbook with `-K`, or as root. |
+| `SATELLITE_URL` | `https://satellite.example.com` (internal DNS is fine) |
+| `SATELLITE_ORG_ID` | `1` |
+| `SATELLITE_LOCATION_ID` | `2` |
+| `ACTIVATION_KEY_RHEL8/9/10` | *(optional override)* |
 
----
+Default activation key convention: `ak-rhel-8`, `ak-rhel-9`, `ak-rhel-10`,
+each mapped in Satellite to the right lifecycle environment, content view,
+and host group.
 
-## License
+## Running it
 
-Provided as-is. Adapt freely for your environment.
+Trigger via **Actions → Run workflow**, or let the monthly cron pick up new
+point releases. Composes typically take 10–30 minutes on Red Hat's side;
+the workflow polls for up to an hour and downloads the presigned URL
+immediately (hosted-builder images expire quickly, so the GitHub artifact
+is your durable copy). Artifacts land as
+`rhel-<N>-satellite-YYYYMMDD.qcow2.zst` — decompress with `zstd -d` and
+import into libvirt, OpenShift Virtualization (CDI), or Proxmox.
+
+On first boot check `/var/log/satellite-register.log` and
+`systemctl status satellite-register`.
+
+## Design notes
+
+- **Why hosted Image Builder?** Real compose-time customization (packages,
+  partitioning, OpenSCAP, kernel args can all be added to the request),
+  Red Hat's infrastructure does the building, and the workflow stays on
+  free `ubuntu-latest` runners doing nothing but API calls. Extending this
+  repo to also emit AMIs, Azure VHDs, or VMware OVAs from the same
+  customizations is a one-block change to `image_requests`.
+- **Files customization lives under `/etc`** — the hosted builder restricts
+  custom file paths, hence `/etc/satellite-register/` rather than
+  `/usr/local/sbin`. The systemd unit is enabled via
+  `customizations.services.enabled`.
+- **Why not the builder's native registration?** Image Builder's built-in
+  registration option targets Red Hat's own RHSM/Insights (console.redhat.com),
+  not an on-prem Satellite. Newer console UI versions have grown a Satellite
+  registration option — if your tenant exposes it in the API schema, it can
+  replace the hand-rolled files customization here; the firstboot approach
+  works regardless of version.
+- **Access tokens are short-lived (~15 min)** while composes take 30+,
+  so the workflow fetches a fresh token per API call rather than reusing one.
+- **Verify field names on first run:** the compose API schema is documented
+  at console.redhat.com/docs/api/image-builder. If `POST /compose` rejects
+  the request, diff against `GET /distributions` output and the current
+  schema — the jq blocks are easy to adjust.

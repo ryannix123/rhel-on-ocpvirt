@@ -1,0 +1,14 @@
+[Unit]
+Description=Register host to Red Hat Satellite on first boot
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=!/var/lib/satellite-register.done
+
+[Service]
+Type=oneshot
+ExecStart=/etc/satellite-register/satellite-register.sh
+RemainAfterExit=yes
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
