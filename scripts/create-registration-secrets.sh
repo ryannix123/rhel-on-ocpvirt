@@ -25,6 +25,11 @@
 #   CLOUD_PASSWORD  - password for that user (optional; console logins)
 # At least one of SSH_PUBKEY / CLOUD_PASSWORD should be set or you will
 # not be able to log into the VMs.
+#
+# No-DNS environments:
+#   SATELLITE_IP    - if your Satellite hostname is not resolvable by DNS
+#                     (e.g. homelab with /etc/hosts only), set this and an
+#                     /etc/hosts entry is added to every VM via cloud-init.
 
 set -euo pipefail
 
@@ -69,6 +74,15 @@ ssh_authorized_keys:
   - ${SSH_PUBKEY}"
 fi
 
+# No-DNS support: prepend an /etc/hosts entry before registration runs
+SATELLITE_HOST=$(echo "${SATELLITE_URL}" | sed -e 's|^https\{0,1\}://||' -e 's|[:/].*$||')
+HOSTS_CMD=""
+if [ -n "${SATELLITE_IP:-}" ]; then
+    HOSTS_CMD="  - [sh, -c, \"grep -q '${SATELLITE_HOST}' /etc/hosts || echo '${SATELLITE_IP} ${SATELLITE_HOST}' >> /etc/hosts\"]
+"
+    echo "Adding hosts entry to userdata: ${SATELLITE_IP} ${SATELLITE_HOST}"
+fi
+
 for MAJOR in 7 8 9 10; do
     AK_VAR="ACTIVATION_KEY_RHEL${MAJOR}"
     ACTIVATION_KEY="${!AK_VAR:-ak-rhel-${MAJOR}}"
@@ -91,7 +105,7 @@ write_files:
       ACTIVATION_KEY=${ACTIVATION_KEY}
       REG_JWT=${SATELLITE_REG_JWT}
 runcmd:
-  - [/etc/satellite-register/satellite-register.sh]
+${HOSTS_CMD}  - [/etc/satellite-register/satellite-register.sh]
 EOF
 
     oc create secret generic "cloudinit-rhel${MAJOR}" \
