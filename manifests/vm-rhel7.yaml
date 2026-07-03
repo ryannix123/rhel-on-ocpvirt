@@ -1,24 +1,8 @@
 ---
-# RHEL 7 has no built-in auto-updating boot source (and 7.9 is the final
-# release anyway), so it's a one-time upload. See README for the
-# virtctl image-upload command that creates the rhel7-base DataVolume/PVC
-# this DataSource points at.
-apiVersion: cdi.kubevirt.io/v1beta1
-kind: DataSource
-metadata:
-  name: rhel7
-  namespace: rhel-fleet
-spec:
-  source:
-    pvc:
-      name: rhel7-base
-      namespace: rhel-fleet
----
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
   name: rhel7-01
-  namespace: rhel-fleet
   labels:
     app: rhel-fleet
     os: rhel7
@@ -34,8 +18,8 @@ spec:
       spec:
         sourceRef:
           kind: DataSource
-          name: rhel7 # local DataSource above (clones the rhel7-base PVC)
-          namespace: rhel-fleet
+          name: rhel7 # created once by setup/rhel7-datasource.yaml
+          namespace: openshift-virtualization-os-images
         storage:
           resources:
             requests:

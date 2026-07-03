@@ -6,19 +6,22 @@
 # namespace. VirtualMachines reference these via cloudInitNoCloud.secretRef,
 # so the Satellite JWT never appears in a VM manifest or Git.
 #
-# Usage:
+# Usage (run from whatever project you want the VMs in):
 #   export SATELLITE_URL=https://satellite.example.com
 #   export SATELLITE_ORG_ID=1
 #   export SATELLITE_LOCATION_ID=2
 #   export SATELLITE_REG_JWT='eyJhbGciOi...'
 #   ./scripts/create-registration-secrets.sh [namespace]
 #
+# Defaults to your current project (oc project -q). Secrets are
+# namespace-scoped, so re-run this once per namespace you deploy VMs into.
+#
 # Activation keys default to ak-rhel-<major>; override with
 # ACTIVATION_KEY_RHEL7/8/9/10 env vars.
 
 set -euo pipefail
 
-NAMESPACE="${1:-rhel-fleet}"
+NAMESPACE="${1:-$(oc project -q)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REG_SCRIPT="${SCRIPT_DIR}/satellite-register.sh"
 
@@ -37,7 +40,8 @@ else
     SCRIPT_B64=$(base64 -i "${REG_SCRIPT}" | tr -d '\n')  # macOS
 fi
 
-oc get namespace "${NAMESPACE}" >/dev/null 2>&1 || oc create namespace "${NAMESPACE}"
+oc get namespace "${NAMESPACE}" >/dev/null || exit 1
+echo "Target namespace: ${NAMESPACE}"
 
 for MAJOR in 7 8 9 10; do
     AK_VAR="ACTIVATION_KEY_RHEL${MAJOR}"

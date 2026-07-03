@@ -1,7 +1,8 @@
 # RHEL Fleet on OpenShift Virtualization, Registered to Satellite
 
-Runs RHEL 7, 8, 9, and 10 VMs in a single namespace on OpenShift
-Virtualization, each auto-registering to **Satellite 6.19** on first boot.
+Runs RHEL 7, 8, 9, and 10 VMs on OpenShift Virtualization — in whatever
+project you're currently in — each auto-registering to **Satellite 6.19**
+on first boot.
 
 **No image pipeline.** OpenShift Virtualization already maintains
 auto-updating RHEL golden images (DataImportCron boot sources in
@@ -16,7 +17,7 @@ a registry, or an external service.
 oc apply VM manifest
   ├─ dataVolumeTemplate clones the boot source
   │    rhel8/9/10 → built-in DataSources (auto-updated by DataImportCron)
-  │    rhel7      → local DataSource from a one-time 7.9 upload
+  │    rhel7      → your DataSource in the same shared namespace (one-time setup)
   └─ cloudInitNoCloud.secretRef → cloudinit-rhel<N> Secret
        write_files: registration script + config
        runcmd (runs once per instance):
@@ -34,11 +35,13 @@ Internal-only Satellite DNS is fine: VMs use the pod network
 ```
 rhel-ocpvirt-satellite/
 ├── README.md
-├── manifests/
-│   ├── vm-rhel7.yaml        # DataSource (local) + VirtualMachine
+├── manifests/                             # namespace-independent; apply anywhere
+│   ├── vm-rhel7.yaml
 │   ├── vm-rhel8.yaml
 │   ├── vm-rhel9.yaml
 │   └── vm-rhel10.yaml
+├── setup/
+│   └── rhel7-datasource.yaml              # one-time, cluster admin, shared namespace
 └── scripts/
     ├── satellite-register.sh              # runs inside each VM via cloud-init
     └── create-registration-secrets.sh     # renders/applies cloudinit-rhel<N> Secrets
@@ -57,46 +60,59 @@ rhel-ocpvirt-satellite/
 - A registration JWT: **Hosts → Register Host**, pick a token lifetime,
   copy the Bearer token from the generated command.
 
-### 2. Create the namespace and cloud-init Secrets
+### 2. One-time RHEL 7 base image setup (cluster admin)
+
+RHEL 7 gets the same treatment as the built-in boot sources: the base
+image lives in the shared `openshift-virtualization-os-images` namespace,
+cloneable from any project. Download `rhel-server-7.9-x86_64-kvm.qcow2`
+from access.redhat.com, then:
 
 ```bash
+virtctl image-upload dv rhel7-base \
+  --namespace openshift-virtualization-os-images \
+  --size 15Gi \
+  --image-path ./rhel-server-7.9-x86_64-kvm.qcow2 \
+  --insecure
+oc apply -f setup/rhel7-datasource.yaml
+```
+
+7.9 is the final RHEL 7 release, so this never needs repeating.
+
+### 3. Create the cloud-init Secrets in your project
+
+```bash
+oc project my-demo    # or wherever the VMs should live
 export SATELLITE_URL=https://satellite.example.com
 export SATELLITE_ORG_ID=1
 export SATELLITE_LOCATION_ID=2
 export SATELLITE_REG_JWT='eyJhbGciOi...'
-./scripts/create-registration-secrets.sh rhel-fleet
+./scripts/create-registration-secrets.sh
 ```
 
-This creates Secrets `cloudinit-rhel7/8/9/10`, each containing complete
-cloud-init userdata (registration script + per-version activation key).
-Rotating the JWT = re-run the script. Existing VMs are unaffected; new VMs
-pick up the new Secret content at creation.
-
-### 3. One-time RHEL 7 base image upload
-
-Download `rhel-server-7.9-x86_64-kvm.qcow2` from access.redhat.com, then:
-
-```bash
-virtctl image-upload dv rhel7-base \
-  --namespace rhel-fleet \
-  --size 15Gi \
-  --image-path ./rhel-server-7.9-x86_64-kvm.qcow2 \
-  --insecure
-```
-
-7.9 is the final RHEL 7 release, so this never needs repeating.
+Targets your **current project** by default (pass a namespace to
+override). Secrets are namespace-scoped, so run once per project you
+deploy into. Rotating the JWT = re-run the script; existing VMs are
+unaffected, new VMs pick up the new content at creation.
 
 ### 4. Launch the fleet
 
 ```bash
 oc apply -f manifests/
-oc get vmi -n rhel-fleet -w
+oc get vmi -w
 ```
 
-Each VM clones its boot source, boots, registers, and installs
-qemu-guest-agent. Within a few minutes all four should appear in
-Satellite under **Hosts → All Hosts**, and `oc get vmi` shows IPs once
-the agent reports in.
+The manifests carry no namespace — VMs land in your current project.
+Each clones its boot source, boots, registers, and installs
+qemu-guest-agent. Within a few minutes all four appear in Satellite
+under **Hosts → All Hosts**, and `oc get vmi` shows IPs once the agent
+reports in.
+
+**Non-admin users:** OpenShift Virtualization ships role bindings that
+let authenticated users clone from `openshift-virtualization-os-images`
+(that's how the built-in templates work), and the KubeVirt admin/edit
+ClusterRoles aggregate into the standard project roles. If a user hits a
+clone-permission error on the rhel7 source, grant `datavolumes/source`
+create in that namespace the same way the built-in sources do.
 
 Troubleshooting inside a guest: `/var/log/satellite-register.log`, or
 re-run `/etc/satellite-register/satellite-register.sh` manually.

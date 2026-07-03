@@ -3,7 +3,6 @@ apiVersion: kubevirt.io/v1
 kind: VirtualMachine
 metadata:
   name: rhel10-01
-  namespace: rhel-fleet
   labels:
     app: rhel-fleet
     os: rhel10
