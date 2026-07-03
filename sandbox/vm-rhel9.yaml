@@ -1,0 +1,65 @@
+---
+# Developer Sandbox variant: inline cloud-init with a login user (the
+# Sandbox webhook requires it inline and cannot read secretRefs), and NO
+# Satellite registration -- the Sandbox cannot reach a private Satellite,
+# so this overlay only validates VM mechanics. CHANGE THE PASSWORD or add
+# your SSH key before applying.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: rhel9-01
+  labels:
+    app: rhel-fleet
+    os: rhel9
+spec:
+  runStrategy: Always
+  instancetype:
+    name: u1.medium
+  preference:
+    name: rhel.9
+  dataVolumeTemplates:
+    - metadata:
+        name: rhel9-01-rootdisk
+      spec:
+        sourceRef:
+          kind: DataSource
+          name: rhel9
+          namespace: openshift-virtualization-os-images
+        storage:
+          resources:
+            requests:
+              storage: 30Gi
+  template:
+    metadata:
+      labels:
+        app: rhel-fleet
+        os: rhel9
+    spec:
+      domain:
+        devices:
+          disks:
+            - name: rootdisk
+              disk:
+                bus: virtio
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+          interfaces:
+            - name: default
+              masquerade: {}
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: rootdisk
+          dataVolume:
+            name: rhel9-01-rootdisk
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |-
+              #cloud-config
+              user: cloud-user
+              password: Ch4ngeMe-N0w
+              chpasswd: { expire: False }
+              # ssh_authorized_keys:
+              #   - ssh-ed25519 AAAA... you@host

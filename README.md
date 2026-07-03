@@ -42,6 +42,10 @@ rhel-ocpvirt-satellite/
 │   └── vm-rhel10.yaml
 ├── setup/
 │   └── rhel7-datasource.yaml              # one-time, cluster admin, shared namespace
+├── sandbox/
+│   ├── vm-rhel8.yaml                      # Developer Sandbox variants (inline
+│   ├── vm-rhel9.yaml                      #   cloud-init user, no registration)
+│   └── vm-rhel10.yaml
 └── scripts/
     ├── satellite-register.sh              # runs inside each VM via cloud-init
     └── create-registration-secrets.sh     # renders/applies cloudinit-rhel<N> Secrets
@@ -86,8 +90,14 @@ export SATELLITE_URL=https://satellite.example.com
 export SATELLITE_ORG_ID=1
 export SATELLITE_LOCATION_ID=2
 export SATELLITE_REG_JWT='eyJhbGciOi...'
+export SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)"   # login access
+# export CLOUD_PASSWORD='...'                      # optional, console logins
 ./scripts/create-registration-secrets.sh
 ```
+
+The generated userdata also creates a login user (`cloud-user` by
+default, override with `CLOUD_USER`) — RHEL cloud images ship with no
+credentials, so without this you can't log in at all.
 
 Targets your **current project** by default (pass a namespace to
 override). Secrets are namespace-scoped, so run once per project you
@@ -118,6 +128,22 @@ Troubleshooting inside a guest: `/var/log/satellite-register.log`, or
 re-run `/etc/satellite-register/satellite-register.sh` manually.
 (Cloud-init runcmd executes once per instance; if registration failed,
 manual re-run is the retry path.)
+
+## Testing in the Developer Sandbox
+
+The Sandbox enforces a webhook requiring a login user **inline** in the
+cloud-init volume (it cannot read secretRefs), and it cannot reach a
+private Satellite, so registration is untestable there by design. Use the
+`sandbox/` variants to validate VM mechanics only:
+
+```bash
+# edit sandbox/*.yaml first: set a real password or uncomment your SSH key
+oc apply -f sandbox/
+```
+
+Sandbox limitations: no RHEL 7 (the shared-namespace setup needs cluster
+admin), no registration, no guest-agent install (needs Satellite repos).
+Full end-to-end testing belongs on your own cluster with `manifests/`.
 
 ## Design notes
 

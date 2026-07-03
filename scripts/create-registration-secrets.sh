@@ -18,6 +18,13 @@
 #
 # Activation keys default to ak-rhel-<major>; override with
 # ACTIVATION_KEY_RHEL7/8/9/10 env vars.
+#
+# Login credentials (RHEL cloud images have NO default credentials):
+#   CLOUD_USER      - login user to create (default: cloud-user)
+#   SSH_PUBKEY      - public key for that user (recommended)
+#   CLOUD_PASSWORD  - password for that user (optional; console logins)
+# At least one of SSH_PUBKEY / CLOUD_PASSWORD should be set or you will
+# not be able to log into the VMs.
 
 set -euo pipefail
 
@@ -43,6 +50,25 @@ fi
 oc get namespace "${NAMESPACE}" >/dev/null || exit 1
 echo "Target namespace: ${NAMESPACE}"
 
+CLOUD_USER="${CLOUD_USER:-cloud-user}"
+if [ -z "${SSH_PUBKEY:-}" ] && [ -z "${CLOUD_PASSWORD:-}" ]; then
+    echo "WARN: neither SSH_PUBKEY nor CLOUD_PASSWORD set -- VMs will register" >&2
+    echo "      to Satellite but you won't be able to log into them." >&2
+fi
+
+# Login block for the cloud-init userdata
+LOGIN_BLOCK="user: ${CLOUD_USER}"
+if [ -n "${CLOUD_PASSWORD:-}" ]; then
+    LOGIN_BLOCK="${LOGIN_BLOCK}
+password: ${CLOUD_PASSWORD}
+chpasswd: { expire: False }"
+fi
+if [ -n "${SSH_PUBKEY:-}" ]; then
+    LOGIN_BLOCK="${LOGIN_BLOCK}
+ssh_authorized_keys:
+  - ${SSH_PUBKEY}"
+fi
+
 for MAJOR in 7 8 9 10; do
     AK_VAR="ACTIVATION_KEY_RHEL${MAJOR}"
     ACTIVATION_KEY="${!AK_VAR:-ak-rhel-${MAJOR}}"
@@ -50,6 +76,7 @@ for MAJOR in 7 8 9 10; do
     USERDATA=$(mktemp)
     cat > "${USERDATA}" <<EOF
 #cloud-config
+${LOGIN_BLOCK}
 write_files:
   - path: /etc/satellite-register/satellite-register.sh
     permissions: '0750'
