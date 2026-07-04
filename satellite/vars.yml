@@ -1,0 +1,59 @@
+---
+# Connection -- export these instead of committing credentials:
+#   export SATELLITE_SERVER_URL=https://satellite.example.com
+#   export SATELLITE_USERNAME=admin
+#   export SATELLITE_PASSWORD='...'
+satellite_server_url: "{{ lookup('env', 'SATELLITE_SERVER_URL') }}"
+satellite_username: "{{ lookup('env', 'SATELLITE_USERNAME') | default('admin', true) }}"
+satellite_password: "{{ lookup('env', 'SATELLITE_PASSWORD') }}"
+satellite_validate_certs: false # homelab default CA
+
+organization: "Default Organization"
+lifecycle_environment: "Library" # keep it simple; add Dev/Prod paths later
+
+# One-time: download a manifest zip from console.redhat.com
+# (Subscription Allocations -> your allocation -> Export Manifest)
+# and set its local path here or via -e manifest_path=...
+manifest_path: "~/Downloads/manifest_satellite.zip"
+
+# Per-major content: repository sets to enable/sync, content view, activation key.
+# qemu-guest-agent lives in AppStream (8/9/10) and rhel-7-server-rpms (7).
+# repo_sets: label + releasever identify the repository SET to enable;
+# name is the resulting REPOSITORY name (what content views reference).
+# Verify names after sync with: hammer repository list --organization-id 1
+rhel_content:
+  - major: "7"
+    product: "Red Hat Enterprise Linux Server"
+    repo_sets:
+      - label: rhel-7-server-rpms
+        releasever: "7Server"
+        name: "Red Hat Enterprise Linux 7 Server RPMs x86_64 7Server"
+    # RHEL 7 is in ELS; updates beyond 7.9 GA require the ELS add-on in
+    # your manifest (label rhel-7-server-els-rpms) -- add here if entitled.
+  - major: "8"
+    product: "Red Hat Enterprise Linux for x86_64"
+    repo_sets:
+      - label: rhel-8-for-x86_64-baseos-rpms
+        releasever: "8"
+        name: "Red Hat Enterprise Linux 8 for x86_64 - BaseOS RPMs 8"
+      - label: rhel-8-for-x86_64-appstream-rpms
+        releasever: "8"
+        name: "Red Hat Enterprise Linux 8 for x86_64 - AppStream RPMs 8"
+  - major: "9"
+    product: "Red Hat Enterprise Linux for x86_64"
+    repo_sets:
+      - label: rhel-9-for-x86_64-baseos-rpms
+        releasever: "9"
+        name: "Red Hat Enterprise Linux 9 for x86_64 - BaseOS RPMs 9"
+      - label: rhel-9-for-x86_64-appstream-rpms
+        releasever: "9"
+        name: "Red Hat Enterprise Linux 9 for x86_64 - AppStream RPMs 9"
+  - major: "10"
+    product: "Red Hat Enterprise Linux for x86_64"
+    repo_sets:
+      - label: rhel-10-for-x86_64-baseos-rpms
+        releasever: "10"
+        name: "Red Hat Enterprise Linux 10 for x86_64 - BaseOS RPMs 10"
+      - label: rhel-10-for-x86_64-appstream-rpms
+        releasever: "10"
+        name: "Red Hat Enterprise Linux 10 for x86_64 - AppStream RPMs 10"

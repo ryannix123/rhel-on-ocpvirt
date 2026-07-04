@@ -1,0 +1,8 @@
+---
+collections:
+  # Certified collection (Automation Hub; needs a hub token in ansible.cfg):
+  - name: redhat.satellite
+  # community.general provides the dict_kv filter used in the playbook
+  - name: community.general
+# No hub access? The upstream equivalent on Galaxy is theforeman.foreman --
+# same modules, different namespace: sed -i 's/redhat.satellite/theforeman.foreman/g'

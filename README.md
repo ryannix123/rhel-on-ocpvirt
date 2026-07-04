@@ -40,6 +40,10 @@ rhel-ocpvirt-satellite/
 │   ├── vm-rhel8.yaml
 │   ├── vm-rhel9.yaml
 │   └── vm-rhel10.yaml
+├── satellite/
+│   ├── configure-satellite-content.yml    # Ansible: manifest, repos, sync, CVs, keys
+│   ├── vars.yml
+│   └── requirements.yml
 ├── sandbox/
 │   ├── vm-rhel8.yaml                      # Developer Sandbox variants (inline
 │   ├── vm-rhel9.yaml                      #   cloud-init user, no registration)
@@ -168,6 +172,30 @@ oc apply -f sandbox/
 Sandbox limitations: no RHEL 7 (the shared-namespace setup needs cluster
 admin), no registration, no guest-agent install (needs Satellite repos).
 Full end-to-end testing belongs on your own cluster with `manifests/`.
+
+## Chapter two: content as code
+
+`satellite/configure-satellite-content.yml` automates everything the lab
+quickstart skipped: manifest upload, enabling and syncing the per-major
+Red Hat repos, one content view per major published to Library, and
+re-pointing `ak-rhel-<N>` at them. Idempotent -- rerun on drift.
+
+```bash
+ansible-galaxy collection install -r satellite/requirements.yml
+export SATELLITE_SERVER_URL=https://satellite.example.com
+export SATELLITE_USERNAME=admin SATELLITE_PASSWORD='...'
+# one-time: export a manifest zip from console.redhat.com
+ansible-playbook satellite/configure-satellite-content.yml \
+  -e manifest_path=~/Downloads/manifest_satellite.zip
+```
+
+First sync pulls tens of GB (runs async in the play; watch Content →
+Sync Status). Afterwards, already-registered hosts still hold their old
+content view -- with two-minute VMs, deleting the Satellite hosts and
+reprovisioning the fleet is faster than editing them. The
+"no installed packages / enabled repositories reported" warning clears on
+each guest's first check-in against real content, and the
+qemu-guest-agent install starts succeeding.
 
 ## Design notes
 

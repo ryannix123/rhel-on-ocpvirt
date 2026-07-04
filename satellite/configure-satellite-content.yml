@@ -1,0 +1,123 @@
+---
+# configure-satellite-content.yml
+#
+# Configures Satellite 6.19 content end-to-end for the RHEL 7-10 fleet:
+#   1. Upload/refresh the subscription manifest
+#   2. Enable the Red Hat repository sets per RHEL major
+#   3. Sync them (long! hours on first run -- see async notes)
+#   4. Create one content view per major containing its repos, publish to Library
+#   5. Point ak-rhel-<major> activation keys at their content view
+#
+# Idempotent: rerun any time; only drift is corrected. Requires the
+# redhat.satellite collection (see requirements.yml).
+#
+#   ansible-playbook satellite/configure-satellite-content.yml
+#
+# NOTE: existing registered hosts keep their old content view assignment.
+# Cheapest fix with 2-minute VMs: delete the hosts in Satellite and
+# reprovision the fleet -- they re-register straight into the new CVs.
+
+- name: Configure Satellite content for the RHEL fleet
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - vars.yml
+  module_defaults:
+    group/redhat.satellite.foreman:
+      server_url: "{{ satellite_server_url }}"
+      username: "{{ satellite_username }}"
+      password: "{{ satellite_password }}"
+      validate_certs: "{{ satellite_validate_certs }}"
+      organization: "{{ organization }}"
+
+  tasks:
+    - name: Upload subscription manifest
+      redhat.satellite.subscription_manifest:
+        manifest_path: "{{ manifest_path }}"
+        state: present
+      tags: [manifest]
+
+    - name: Enable Red Hat repository sets
+      redhat.satellite.repository_set:
+        product: "{{ item.0.product }}"
+        label: "{{ item.1.label }}"
+        repositories:
+          - releasever: "{{ item.1.releasever }}"
+            basearch: x86_64
+        state: enabled
+      loop: "{{ rhel_content | subelements('repo_sets') }}"
+      loop_control:
+        label: "{{ item.1.label }}"
+      tags: [repos]
+
+    # First sync pulls tens of GB -- run async so a lost SSH session or
+    # laptop lid doesn't kill it. Poll with the follow-up task, or watch
+    # in the UI under Content > Sync Status.
+    - name: Sync repositories (async, up to 6h)
+      redhat.satellite.repository_sync:
+        product: "{{ item }}"
+      loop: "{{ rhel_content | map(attribute='product') | unique | list }}"
+      async: 21600
+      poll: 0
+      register: sync_jobs
+      tags: [sync]
+
+    - name: Wait for syncs to complete
+      ansible.builtin.async_status:
+        jid: "{{ item.ansible_job_id }}"
+      loop: "{{ sync_jobs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      register: sync_status
+      until: sync_status.finished
+      retries: 360
+      delay: 60
+      tags: [sync]
+
+    - name: Create per-major content views
+      redhat.satellite.content_view:
+        name: "cv-rhel-{{ item.major }}"
+        repositories: >-
+          {{ item.repo_sets
+             | map(attribute='name')
+             | map('community.general.dict_kv', 'name')
+             | map('combine', {'product': item.product})
+             | list }}
+        state: present
+      loop: "{{ rhel_content }}"
+      loop_control:
+        label: "cv-rhel-{{ item.major }}"
+      tags: [cv]
+
+    - name: Publish content view versions to Library
+      redhat.satellite.content_view_version:
+        content_view: "cv-rhel-{{ item.major }}"
+        lifecycle_environments:
+          - "{{ lifecycle_environment }}"
+        state: present
+      loop: "{{ rhel_content }}"
+      loop_control:
+        label: "cv-rhel-{{ item.major }}"
+      tags: [cv]
+
+    - name: Point activation keys at their content views
+      redhat.satellite.activation_key:
+        name: "ak-rhel-{{ item.major }}"
+        lifecycle_environment: "{{ lifecycle_environment }}"
+        content_view: "cv-rhel-{{ item.major }}"
+        unlimited_hosts: true
+        state: present
+      loop: "{{ rhel_content }}"
+      loop_control:
+        label: "ak-rhel-{{ item.major }}"
+      tags: [keys]
+
+    - name: Next steps
+      ansible.builtin.debug:
+        msg: >-
+          Content views published and activation keys mapped. Existing hosts
+          still reference their old content view: either change it per-host
+          (Hosts > edit > Content View) and run 'subscription-manager refresh'
+          in the guest, or -- faster with 2-minute VMs -- delete the hosts in
+          Satellite and reprovision the fleet.
