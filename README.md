@@ -17,7 +17,7 @@ a registry, or an external service.
 oc apply VM manifest
   ├─ dataVolumeTemplate clones the boot source
   │    rhel8/9/10 → built-in DataSources (auto-updated by DataImportCron)
-  │    rhel7      → your DataSource in the same shared namespace (one-time setup)
+  │    rhel7      → platform's own rhel7 DataSource (one-time image upload)
   └─ cloudInitNoCloud.secretRef → cloudinit-rhel<N> Secret
        write_files: registration script + config
        runcmd (runs once per instance):
@@ -40,8 +40,6 @@ rhel-ocpvirt-satellite/
 │   ├── vm-rhel8.yaml
 │   ├── vm-rhel9.yaml
 │   └── vm-rhel10.yaml
-├── setup/
-│   └── rhel7-datasource.yaml              # one-time, cluster admin, shared namespace
 ├── sandbox/
 │   ├── vm-rhel8.yaml                      # Developer Sandbox variants (inline
 │   ├── vm-rhel9.yaml                      #   cloud-init user, no registration)
@@ -55,37 +53,63 @@ rhel-ocpvirt-satellite/
 
 ### 1. Satellite prerequisites
 
-- Activation keys `ak-rhel-7` … `ak-rhel-10`, each mapped to the right
-  lifecycle environment / content view / host group. Make sure each
-  content view carries the OS repos **including qemu-guest-agent** (BaseOS
-  for 8/9/10, `rhel-7-server-rpms` for 7) so the script can install it.
-- RHEL 7 clients need **ELS** repos synced if you want updates; 7.9
-  registers fine either way.
-- A registration JWT: **Hosts → Register Host**, pick a token lifetime,
-  copy the Bearer token from the generated command.
-
-### 2. One-time RHEL 7 base image setup (cluster admin)
-
-RHEL 7 gets the same treatment as the built-in boot sources: the base
-image lives in the shared `openshift-virtualization-os-images` namespace,
-cloneable from any project. Download `rhel-server-7.9-x86_64-kvm.qcow2`
-from access.redhat.com, then:
+Activation keys `ak-rhel-7` … `ak-rhel-10` and a registration JWT. Lab
+quickstart (SCA-mode Satellite; Library + Default Org View registers fine
+with zero content synced):
 
 ```bash
-virtctl image-upload dv rhel7-base \
-  --namespace openshift-virtualization-os-images \
-  --size 15Gi \
-  --image-path ./rhel-server-7.9-x86_64-kvm.qcow2 \
-  --insecure
-oc apply -f setup/rhel7-datasource.yaml
+# on the Satellite host
+for v in 7 8 9 10; do
+  hammer -u admin -p '<password>' activation-key create \
+    --organization-id 1 --name "ak-rhel-${v}" \
+    --lifecycle-environment Library \
+    --content-view "Default Organization View" --unlimited-hosts
+done
+
+# registration JWT (30-day): the token is the string after "Bearer"
+hammer -u admin -p '<password>' host-registration generate-command \
+  --organization-id 1 --location-id 2 \
+  --activation-keys ak-rhel-9 \
+  --jwt-expiration 720 --insecure true \
+  | sed -n "s/.*Bearer \([^']*\)'.*/\1/p"
 ```
 
-7.9 is the final RHEL 7 release, so this never needs repeating.
+For the guest-agent install step to succeed, sync the OS repos and point
+each key's content view at them (BaseOS/AppStream for 8/9/10,
+`rhel-7-server-rpms` + ELS for 7). Without content, hosts still register —
+the agent install just logs a warning and skips. Org/location IDs:
+`hammer organization list` / `hammer location list`.
+
+### 2. One-time RHEL 7 base image upload (cluster admin)
+
+OpenShift Virtualization already ships a `rhel7` DataSource stub in
+`openshift-virtualization-os-images` — it points at a PVC named `rhel7`
+and waits for you to supply it. (Don't create or edit DataSources there;
+the SSP operator reverts changes.) So: download the RHEL 7.9 KVM Guest
+Image from access.redhat.com (Downloads → All Products → RHEL 7 → 7.9)
+and upload it under the expected name:
+
+```bash
+virtctl image-upload dv rhel7 \
+  --namespace openshift-virtualization-os-images \
+  --size 15Gi \
+  --image-path ./rhel-server-7.9-update-12-x86_64-kvm.qcow2 \
+  --force-bind --insecure
+```
+
+`--force-bind` matters on WaitForFirstConsumer storage (LVM Storage /
+topolvm on SNO): uploads have no consumer pod, so without it the PVC
+deadlocks in Pending. 7.9 is the final RHEL 7 release, so this never
+needs repeating.
 
 ### 3. Create the cloud-init Secrets in your project
 
+Run this in the SAME project the VMs will be deployed into — Secrets are
+namespace-scoped, and a VM whose `cloudinit-rhel<N>` Secret is missing
+sits in Init/ContainerCreating with a FailedMount event until it exists.
+
 ```bash
-oc project my-demo    # or wherever the VMs should live
+oc project my-demo    # MUST match where you'll oc apply the manifests
 export SATELLITE_URL=https://satellite.example.com
 export SATELLITE_ORG_ID=1
 export SATELLITE_LOCATION_ID=2
@@ -152,10 +176,11 @@ Full end-to-end testing belongs on your own cluster with `manifests/`.
   from the guest after registration), and it composes with OCP Virt's
   auto-updated boot sources — you always boot the current RHEL point
   release without rebuilding anything.
-- **instancetype/preference:** `u1.medium` + `rhel.<N>` cluster preferences
-  set sane defaults. Don't add `domain.cpu`/`memory` alongside an
-  instancetype — KubeVirt rejects the conflict. Scale up by swapping
-  `u1.medium` for `u1.large`, etc.
+- **instancetype/preference:** `u1.small` (1 vCPU/2Gi) + `rhel.<N>`
+  preferences — sized so all four fit on a busy single node; swap for
+  `u1.medium`/`u1.large` if you have headroom. Don't add
+  `domain.cpu`/`memory` alongside an instancetype — KubeVirt rejects the
+  conflict.
 - **RHEL 10 note:** boot sources for RHEL 10 require a current OCP Virt
   (4.19+). Your SNO node CPU (i9-12900) satisfies RHEL 10's x86-64-v3
   requirement; the default CPU passthrough on OCP Virt handles the rest.

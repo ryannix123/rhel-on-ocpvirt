@@ -9,7 +9,7 @@ metadata:
 spec:
   runStrategy: Always
   instancetype:
-    name: u1.medium # 1 vCPU / 4Gi; do NOT also set domain cpu/memory
+    name: u1.small # 1 vCPU / 2Gi; do NOT also set domain cpu/memory
   preference:
     name: rhel.10
   dataVolumeTemplates:

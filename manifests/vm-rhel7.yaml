@@ -9,7 +9,7 @@ metadata:
 spec:
   runStrategy: Always
   instancetype:
-    name: u1.medium
+    name: u1.small
   preference:
     name: rhel.7
   dataVolumeTemplates:
@@ -18,7 +18,7 @@ spec:
       spec:
         sourceRef:
           kind: DataSource
-          name: rhel7 # created once by setup/rhel7-datasource.yaml
+          name: rhel7 # platform-provided DataSource; see README one-time upload
           namespace: openshift-virtualization-os-images
         storage:
           resources:
