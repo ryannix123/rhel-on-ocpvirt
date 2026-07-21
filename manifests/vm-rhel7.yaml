@@ -40,11 +40,12 @@ spec:
               disk:
                 bus: virtio
           interfaces:
-            - name: default
-              masquerade: {}
+            - name: vm-dhcp-network
+              bridge: {}
       networks:
-        - name: default
-          pod: {}
+        - name: vm-dhcp-network
+          multus:
+            networkName: vm-dhcp-network
       volumes:
         - name: rootdisk
           dataVolume:
